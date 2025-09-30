@@ -202,11 +202,11 @@ internal static class LlvmCompiler
             {
                 val = ldconstix.Len switch
                 {
-                    1  => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, (ulong)ldconstix.Value, false),
-                    8  => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, (ulong)ldconstix.Value, true),
-                    16 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int16, (ulong)ldconstix.Value, true),
-                    32 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, (ulong)ldconstix.Value, true),
-                    64 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, (ulong)ldconstix.Value, true),
+                    1  => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int1, unchecked((ulong)(Int128)ldconstix.Value), true),
+                    8  => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int8, unchecked((ulong)(Int128)ldconstix.Value), true),
+                    16 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int16, unchecked((ulong)(Int128)ldconstix.Value), true),
+                    32 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, unchecked((ulong)(Int128)ldconstix.Value), true),
+                    64 => LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, unchecked((ulong)(Int128)ldconstix.Value), true),
                     _  => LLVMValueRef.CreateConstIntOfArbitraryPrecision(
                         LLVMTypeRef.CreateInt(ldconstix.Len), BigIntegerToULongs(ldconstix.Value, ldconstix.Len)),
                 };
@@ -231,9 +231,8 @@ internal static class LlvmCompiler
             
             case FlagTypeInt @tint:
             {
-                var t1 = new IntegerTypeReference(tint.Signed, tint.Size);
-                var t2 = ConvType(t1);
-                return CompileFunctionValueTyped(ctx, t1, t2);
+                var ty = new IntegerTypeReference(tint.Signed, tint.Size);
+                return CompileFunctionValueTyped(ctx, ty);
             }
 
             default: throw new UnreachableException();
@@ -264,7 +263,7 @@ internal static class LlvmCompiler
             : ctx.builder.BuildLoad2(ConvType(holding), val);
     }
 
-    private static LLVMValueRef CompileFunctionValueTyped(CompileFunctionCtx ctx, TypeReference type1, LLVMTypeRef type2)
+    private static LLVMValueRef CompileFunctionValueTyped(CompileFunctionCtx ctx, TypeReference ty)
     {
         var a = ctx.body.Dequeue();
         switch (a)
@@ -280,12 +279,16 @@ internal static class LlvmCompiler
                     CompileFunctionValue(ctx));
 
             case InstExtend:
-                return (((IntegerTypeReference)type1).Signed)
-                    ? ctx.builder.BuildSExt(CompileFunctionValue(ctx), type2)
-                    : ctx.builder.BuildZExt(CompileFunctionValue(ctx), type2);
-
+                return (((IntegerTypeReference)ty).Signed)
+                    ? ctx.builder.BuildSExt(CompileFunctionValue(ctx), ConvType(ty))
+                    : ctx.builder.BuildZExt(CompileFunctionValue(ctx), ConvType(ty));
+            
             case InstTrunc:
-                    return ctx.builder.BuildTrunc(CompileFunctionValue(ctx), type2);
+                    return ctx.builder.BuildTrunc(CompileFunctionValue(ctx), ConvType(ty));
+            
+            case InstSigcast:
+                // LLVM handles signess in context
+                return CompileFunctionValue(ctx);
             
             default: throw new UnreachableException();
         }
