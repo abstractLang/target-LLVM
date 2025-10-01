@@ -40,7 +40,7 @@ internal static class LlvmCompiler
 
     private static void DeclareModuleMembers(ModuleBuilder baseModule, LLVMModuleRef llvmModule)
     {
-        // Abstract should unnest all namespaces!
+        // Abstract should have unnested all namespaces!
         foreach (var i in baseModule.Structures) UnwrapStructureHeader(i, llvmModule);
         foreach (var i in baseModule.Functions) UnwrapFunctionHeader(i, llvmModule);
     }
@@ -268,27 +268,21 @@ internal static class LlvmCompiler
         var a = ctx.body.Dequeue();
         switch (a)
         {
-            case InstAdd:
-                return ctx.builder.BuildAdd(
-                    CompileFunctionValue(ctx),
-                    CompileFunctionValue(ctx));
+            case InstAdd: return ctx.builder.BuildAdd(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
             
-            case InstMul:
-                return ctx.builder.BuildMul(
-                    CompileFunctionValue(ctx),
-                    CompileFunctionValue(ctx));
+            case InstMul: return ctx.builder.BuildMul(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
 
+            case InstAnd: return ctx.builder.BuildAnd(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            case InstOr: return ctx.builder.BuildOr(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            case InstXor: return ctx.builder.BuildXor(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            
+            case InstConv: return ctx.builder.BuildIntCast(CompileFunctionValue(ctx), ConvType(ty));
             case InstExtend:
                 return (((IntegerTypeReference)ty).Signed)
                     ? ctx.builder.BuildSExt(CompileFunctionValue(ctx), ConvType(ty))
                     : ctx.builder.BuildZExt(CompileFunctionValue(ctx), ConvType(ty));
-            
-            case InstTrunc:
-                    return ctx.builder.BuildTrunc(CompileFunctionValue(ctx), ConvType(ty));
-            
-            case InstSigcast:
-                // LLVM handles signess in context
-                return CompileFunctionValue(ctx);
+            case InstTrunc: return ctx.builder.BuildTrunc(CompileFunctionValue(ctx), ConvType(ty));
+            case InstSigcast: return CompileFunctionValue(ctx); // LLVM handles signess in context
             
             default: throw new UnreachableException();
         }
