@@ -27,7 +27,7 @@ public class Module : IModule
                     UnnestMembers = true,
                     
                     MemoryUnit = 8,
-                    IptrSize = 32,
+                    NativeIntegerSize = 32,
                 },
                 CompilerInvoke = TargetWasm.LlvmCompileWasm
             },

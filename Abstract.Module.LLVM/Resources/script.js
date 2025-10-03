@@ -1,4 +1,4 @@
-import { Std, StdSettings } from './std.js';
+import { Std, std_settings } from './std.js';
 
 const stdout = document.querySelector("#stdout");
 const stdin = document.querySelector("#stdin");
@@ -20,15 +20,14 @@ async function _start()
         },
         Std: Std
     };
-
     
     const wasminstance = (await WebAssembly.instantiateStreaming(wasmcode, rootlibs)).instance;
     const main = wasminstance.exports["MyProgram.main"];
 
-    StdSettings.define_stdout(append_simple_stdout);
+    std_settings.stdout = append_simple_stdout;
+    std_settings.memory = memoryView;
     
     append_stdout("control", "Program started\n");
-    StdSettings.setup();
     main();
     append_stdout("control", "Program finished\n");
 }

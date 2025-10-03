@@ -1,17 +1,19 @@
 using System.Reflection;
 using Abstract.Module.LLVM.Compiler;
 using Abstract.Realizer.Builder;
+using Abstract.Realizer.Core.Configuration.LangOutput;
 using LLVMSharp.Interop;
 
 namespace Abstract.Module.LLVM.Targets;
 
 public static class TargetWasm
 {
-    internal static void LlvmCompileWasm(ProgramBuilder program)
+    internal static void LlvmCompileWasm(ProgramBuilder program, ILanguageOutputConfiguration config)
     {
         
         Console.WriteLine("Compiling to WASM with LLVM...");
-        var module = LlvmCompiler.Compile(program);
+        var llvmCompiler = new LlvmCompiler();
+        var module = llvmCompiler.Compile(program, config);
         
         LLVMSharp.Interop.LLVM.InitializeWebAssemblyTarget();
         LLVMSharp.Interop.LLVM.InitializeWebAssemblyTargetInfo();
