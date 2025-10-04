@@ -61,9 +61,10 @@ internal class LlvmCompiler
     private void UnwrapFunctionHeader(BaseFunctionBuilder baseFunc)
     {
         LLVMTypeRef[] argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
-        LLVMTypeRef functype = LLVMTypeRef.CreateFunction(LLVMTypeRef.Void, argumentTypes, false);
+        LLVMTypeRef functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes, false);
         
         LLVMValueRef fun = llvmModule.AddFunction(baseFunc.Symbol, functype);
+        
         switch (baseFunc)
         {
             case FunctionBuilder @func:
@@ -111,14 +112,14 @@ internal class LlvmCompiler
         foreach (var (baseFunction, (llvmFuncType, llvmFunction)) in functions)
         {
             if (baseFunction is not FunctionBuilder @fb) continue;
-            
-            var entry = llvmFunction.AppendBasicBlock("entry");
-            llvmBuilder.PositionAtEnd(entry);
             CompileFunction(fb, llvmFunction);
         }
     }
     private void CompileFunction(FunctionBuilder baseFunc, LLVMValueRef llvmFunction)
     {
+        var entry = llvmFunction.AppendBasicBlock("entry");
+        llvmBuilder.PositionAtEnd(entry);
+        
         var args = new LLVMValueRef[llvmFunction.ParamsCount];
         foreach (var (i, (_, type)) in baseFunc.Parameters.Index())
         {
@@ -145,7 +146,6 @@ internal class LlvmCompiler
         };
         
         while (body.Count > 0) CompileFunctionInstruction(ctx);
-        llvmBuilder.BuildRetVoid();
     }
 
     private void CompileFunctionInstruction(CompileFunctionCtx ctx)
@@ -164,23 +164,6 @@ internal class LlvmCompiler
                 var val = CompileFunctionValueNullable(ctx);
                 if (!val.HasValue) return;
                 llvmBuilder.BuildStore(val.Value, ctx.locals[stlocal.index].ptr);
-            } break;
-            
-            case InstCall @call:
-            {
-                ctx.body.Dequeue();
-                
-                List<LLVMValueRef> argsList = [];
-                
-                for (var i = 0; i < call.function.Parameters.Count; i++) 
-                    argsList.Add(CompileFunctionValue(ctx));
-
-                var funck = BuilderToValueRef(call.function);
-                
-                llvmBuilder.BuildCall2(
-                    funck.ftype,
-                    funck.fun,
-                    argsList.ToArray());
             } break;
             
             default:
@@ -254,8 +237,8 @@ internal class LlvmCompiler
 
             case InstRet @r:
                 return r.value
-                    ? llvmBuilder.BuildRetVoid()
-                    : llvmBuilder.BuildRet(CompileFunctionValue(ctx));
+                    ? llvmBuilder.BuildRet(CompileFunctionValue(ctx))
+                    : llvmBuilder.BuildRetVoid();
             
             case FlagTypeInt @tint:
             {
@@ -263,6 +246,21 @@ internal class LlvmCompiler
                 return CompileFunctionValueTyped(ctx, ty);
             }
 
+            case InstCall @call:
+            {
+                List<LLVMValueRef> argsList = [];
+                
+                for (var i = 0; i < call.function.Parameters.Count; i++) 
+                    argsList.Add(CompileFunctionValue(ctx));
+
+                var funck = BuilderToValueRef(call.function);
+                
+                val = llvmBuilder.BuildCall2(
+                    funck.ftype,
+                    funck.fun,
+                    argsList.ToArray());
+            } break;
+            
             default: throw new UnreachableException();
         }
         
@@ -286,7 +284,9 @@ internal class LlvmCompiler
             else break;
         }
 
-        return holding == null ? val : llvmBuilder.BuildLoad2(ConvType(holding), val);
+        return holding == null
+            ? val
+            : llvmBuilder.BuildLoad2(ConvType(holding), val);
     }
 
     private LLVMValueRef CompileFunctionValueTyped(CompileFunctionCtx ctx, TypeReference ty)
@@ -346,8 +346,9 @@ internal class LlvmCompiler
     }
 
 
-    private LLVMTypeRef ConvType(TypeReference typeref)
+    private LLVMTypeRef ConvType(TypeReference? typeref)
     {
+        if (typeref == null) return LLVMTypeRef.Void;
         return typeref switch
         {
             IntegerTypeReference @intt => intt.Bits! switch

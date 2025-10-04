@@ -14,7 +14,7 @@ function stringPtrToString(str_ptr, str_len) {
 function Console_write_i64(num) { std_settings.stdout(num.toString()); }
 function Console_write_u64(num) { std_settings.stdout(BigInt.asUintN(64, num).toString()); }
 function Console_write_string$Utf8(str_ptr, str_len) {
-    std_settings.stdout("Std.Console.write(string(Utf8): " + stringPtrToString(str_ptr, str_len)); }
+    std_settings.stdout(stringPtrToString(str_ptr, str_len)); }
 
 function Console_writeln_i64(num) { std_settings.stdout(num + "\n"); }
 function Console_writeln_u64(num) { std_settings.stdout(BigInt.asUintN(64, num).toString() + "\n"); }
