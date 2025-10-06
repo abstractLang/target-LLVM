@@ -28,18 +28,17 @@ internal class LlvmCompiler
         llvmContext = LLVMContextRef.Create();
         
         configuration = config;
-        var rootModule = program.GetRoot()!;
         
-        llvmModule = llvmContext.CreateModuleWithName(rootModule.Symbol);
+        llvmModule = llvmContext.CreateModuleWithName(program.Modules[0].Symbol);
         llvmBuilder = llvmContext.CreateBuilder();
-        
-        DeclareModuleMembers(rootModule);
+
+        foreach (var m in program.Modules) DeclareModuleMembers(m);
         
         CompileFunctions();
         CompileStructs();
         
         var ll = llvmModule.PrintToString();
-        File.WriteAllText(".abs-cache/debug/llvmout.ll", ll);
+        File.WriteAllText($".abs-cache/debug/{program.Modules[0].Symbol}.llvmout.ll", ll);
 
         return llvmModule;
     }
@@ -127,7 +126,10 @@ internal class LlvmCompiler
             if (type is NodeTypeReference @nt && nt.TypeReference is StructureBuilder)
             {
                 var local = llvmBuilder.BuildAlloca(paramValue.TypeOf);
-                llvmBuilder.BuildStore(paramValue, local);
+                var store = llvmBuilder.BuildStore(paramValue, local);
+                local.SetAlignment((type.Alignment ?? configuration.NativeIntegerSize) / configuration.MemoryUnit);
+                store.SetAlignment((type.Alignment ?? configuration.NativeIntegerSize) / configuration.MemoryUnit);
+                
                 paramValue = local;
             }
 
@@ -154,16 +156,22 @@ internal class LlvmCompiler
         switch (a)
         {
             case MacroDefineLocal @deflocal:
+            {
+                var alloca = llvmBuilder.BuildAlloca(ConvType(deflocal.Type));
+                alloca.SetAlignment((deflocal.Type.Alignment ?? configuration.NativeIntegerSize) / configuration.MemoryUnit);
+                
                 ctx.body.Dequeue();
-                ctx.locals.Add((deflocal.Type, llvmBuilder.BuildAlloca(ConvType(deflocal.Type))));
-                break;
+                ctx.locals.Add((deflocal.Type, alloca));
+            } break;
 
             case InstStLocal @stlocal:
             {
                 ctx.body.Dequeue();
                 var val = CompileFunctionValueNullable(ctx);
                 if (!val.HasValue) return;
-                llvmBuilder.BuildStore(val.Value, ctx.locals[stlocal.index].ptr);
+                var store = llvmBuilder.BuildStore(val.Value, ctx.locals[stlocal.index].ptr);
+                store.SetAlignment((ctx.locals[stlocal.index].type.Alignment ?? configuration.NativeIntegerSize)
+                                   / configuration.MemoryUnit);
             } break;
             
             default:
@@ -232,6 +240,12 @@ internal class LlvmCompiler
                     holding = ctx.locals[ldlocal.Local].type;
                 }
                 break;
+            case InstLdLocalRef @ldlocalref:
+                val = ldlocalref.Local < 0
+                    ? ctx.args[(-ldlocalref.Local) - 1]
+                    : ctx.locals[ldlocalref.Local].ptr;
+                break;
+                
             
             case InstLdNewObject: return null;
 
@@ -278,15 +292,17 @@ internal class LlvmCompiler
                 ctx.body.Dequeue();
                 var tostore = CompileFunctionValue(ctx);
                 val = llvmBuilder.BuildStore(tostore, ptr);
+                val.SetAlignment((holding.Alignment ?? configuration.NativeIntegerSize) / configuration.MemoryUnit);
                 holding = null;
                 break;
             }
             else break;
         }
 
-        return holding == null
-            ? val
-            : llvmBuilder.BuildLoad2(ConvType(holding), val);
+        if (holding == null) return val;
+        val = llvmBuilder.BuildLoad2(ConvType(holding), val);
+        val.SetAlignment((holding.Alignment ?? configuration.NativeIntegerSize) / configuration.MemoryUnit);
+        return val;
     }
 
     private LLVMValueRef CompileFunctionValueTyped(CompileFunctionCtx ctx, TypeReference ty)
@@ -368,6 +384,7 @@ internal class LlvmCompiler
             },
             
             SliceTypeReference @slice => CreateSlice(ConvType(slice.Subtype)),
+            ReferenceTypeReference @refe => LLVMTypeRef.CreatePointer(ConvType(refe.Subtype), 0),
             
             _ => throw new UnreachableException()
         };

@@ -17,6 +17,7 @@ async function _start()
         env: {
             "__linear_memory": memory,
             "__stack_pointer": new WebAssembly.Global({ value: "i32", mutable: true }, stackPointer),
+            "__multi3": i128_multiply
         },
         Std: Std
     };
@@ -69,3 +70,10 @@ function handle_escape(text)
     return text;
 }
 
+function i128_multiply(aLow, aHigh, bLow, bHigh) {
+    const a = (BigInt(aHigh) << 64n) | BigInt(aLow);
+    const b = (BigInt(bHigh) << 64n) | BigInt(bLow);
+    const res = a * b;
+    console.log(a, "+", b, "=", res);
+    return [Number(res & 0xFFFFFFFFFFFFFFFFn), Number(res >> 64n)];
+}
