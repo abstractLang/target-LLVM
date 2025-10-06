@@ -10,14 +10,14 @@ using LLVMSharp.Interop;
 
 namespace Abstract.Module.LLVM.Compiler;
 
-internal class LlvmCompiler
+internal class LlvmCompiler(LLVMContextRef ctx)
 {
     private ILanguageOutputConfiguration configuration;
     
     private Dictionary<BaseFunctionBuilder, (LLVMTypeRef ftype, LLVMValueRef fobj)> functions = [];
     private Dictionary<StructureBuilder, LLVMTypeRef> structures = [];
     
-    private LLVMContextRef llvmContext;
+    private readonly LLVMContextRef llvmContext = ctx;
     private LLVMModuleRef llvmModule;
     private LLVMBuilderRef llvmBuilder;
     
@@ -25,8 +25,7 @@ internal class LlvmCompiler
     internal LLVMModuleRef Compile(ProgramBuilder program, ILanguageOutputConfiguration config) 
     {
         functions.Clear();
-        llvmContext = LLVMContextRef.Create();
-        
+        structures.Clear();
         configuration = config;
         
         llvmModule = llvmContext.CreateModuleWithName(program.Modules[0].Symbol);
@@ -40,6 +39,8 @@ internal class LlvmCompiler
         var ll = llvmModule.PrintToString();
         File.WriteAllText($".abs-cache/debug/{program.Modules[0].Symbol}.llvmout.ll", ll);
 
+        if (!llvmModule.TryVerify(LLVMVerifierFailureAction.LLVMReturnStatusAction, out var msg))
+            File.WriteAllText($".abs-cache/debug/{program.Modules[0].Symbol}.llvmdump.txt", msg);
         return llvmModule;
     }
 
@@ -59,19 +60,21 @@ internal class LlvmCompiler
     }
     private void UnwrapFunctionHeader(BaseFunctionBuilder baseFunc)
     {
-        LLVMTypeRef[] argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
-        LLVMTypeRef functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes, false);
+        var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
+        var functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes);
         
-        LLVMValueRef fun = llvmModule.AddFunction(baseFunc.Symbol, functype);
+        var fun = llvmModule.AddFunction(baseFunc.Symbol, functype);
         
         switch (baseFunc)
         {
             case FunctionBuilder @func:
             {
-                fun.Linkage = LLVMLinkage.LLVMDLLExportLinkage;
-                fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
-                
-                fun.AddTargetDependentFunctionAttr("wasm-export-name", baseFunc.Symbol);
+                if (func.ExportSymbol != null)
+                {
+                    fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                    fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+                    fun.AddTargetDependentFunctionAttr("wasm-export-name", baseFunc.Symbol);
+                }
             } break;
 
             case ImportedFunctionBuilder importedFunc:
@@ -123,7 +126,7 @@ internal class LlvmCompiler
         foreach (var (i, (_, type)) in baseFunc.Parameters.Index())
         {
             var paramValue = llvmFunction.GetParam((uint)i);
-            if (type is NodeTypeReference @nt && nt.TypeReference is StructureBuilder)
+            if (type is NodeTypeReference { TypeReference: StructureBuilder })
             {
                 var local = llvmBuilder.BuildAlloca(paramValue.TypeOf);
                 var store = llvmBuilder.BuildStore(paramValue, local);

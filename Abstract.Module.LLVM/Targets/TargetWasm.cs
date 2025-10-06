@@ -12,7 +12,10 @@ public static class TargetWasm
     {
         
         Console.WriteLine("Compiling to WASM with LLVM...");
-        var llvmCompiler = new LlvmCompiler();
+        
+        var ctx = LLVMContextRef.Global;
+        
+        var llvmCompiler = new LlvmCompiler(ctx);
         LLVMModuleRef[] modules = [llvmCompiler.Compile(program, config)];
         
         LLVMSharp.Interop.LLVM.InitializeWebAssemblyTarget();
@@ -42,7 +45,10 @@ public static class TargetWasm
         
         Console.WriteLine("LLVM: Emitting artifacts...");
         
-        targetMachine.EmitToFile(modules[0], ".abs-out/main.wasm", LLVMCodeGenFileType.LLVMObjectFile);
+        if (!targetMachine.TryEmitToFile(modules[0], ".abs-out/main.wasm", 
+                LLVMCodeGenFileType.LLVMObjectFile, out var err))
+            throw new Exception(err);
+        
         File.Copy(Path.Combine(exeDir, "Resources/index.html"), ".abs-out/index.html", true);
         File.Copy(Path.Combine(exeDir, "Resources/script.js"), ".abs-out/script.js", true);
         File.Copy(Path.Combine(exeDir, "Resources/std.js"), ".abs-out/std.js", true);
