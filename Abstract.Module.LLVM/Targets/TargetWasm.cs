@@ -15,7 +15,7 @@ public static class TargetWasm
         
         var ctx = LLVMContextRef.Global;
         
-        var llvmCompiler = new LlvmCompiler(ctx);
+        var llvmCompiler = new LlvmCompiler(ctx, TargetsList.Wasm);
         LLVMModuleRef[] modules = [llvmCompiler.Compile(program, config)];
         
         LLVMSharp.Interop.LLVM.InitializeWebAssemblyTarget();
