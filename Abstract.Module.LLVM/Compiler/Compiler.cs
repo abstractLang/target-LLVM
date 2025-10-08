@@ -23,7 +23,8 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     private readonly LLVMContextRef llvmContext = ctx;
     private LLVMModuleRef llvmModule;
     private LLVMBuilderRef llvmBuilder;
-    
+
+    private Dictionary<int, LLVMValueRef> staticBufferMap = [];
     
     internal LLVMModuleRef Compile(ProgramBuilder program, ILanguageOutputConfiguration config) 
     {
@@ -85,15 +86,18 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         var st = llvmContext.CreateNamedStruct(struc.Symbol);
         
         var ttt = LLVMTypeRef.CreateStruct([
-            LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0), // Parent table
+            LLVMTypeRef.CreatePointer(GetNativeInt(), 0), // Parent table
             GetNativeInt(), // Type size
-            CreateSlice(LLVMTypeRef.Int8) // StructName
+            CreateSlice(LLVMTypeRef.Int8), // StructName
+            LLVMTypeRef.CreatePointer(GetNativeInt(), 0) // Vtable
         ], true);
         var tt = llvmModule.AddGlobal(ttt, struc.Symbol + ".vtable");
         structures.Add(struc, (st, tt));
     }
     private void UnwrapFunctionHeader(BaseFunctionBuilder baseFunc)
     {
+        if (baseFunc is AbstractFunctionBuilder) return;
+        
         var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
         var functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes);
         
@@ -275,9 +279,16 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                     ? ctx.args[(-ldlocalref.Local) - 1]
                     : ctx.locals[ldlocalref.Local].ptr;
                 break;
-                
-            
-            case InstLdNewObject: return null;
+
+
+            case InstLdNewObject @newobj:
+            {
+                var structRef = newobj.Type;
+                var typetype = structures[structRef].type;
+                var typetbl = structures[structRef].typetbl;
+
+                return LLVMValueRef.CreateConstStruct([typetbl], false);
+            }
 
             case InstRet @r:
                 return r.value
@@ -365,30 +376,34 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         IOmegaInstruction access,
         out TypeReference ptrType)
     {
+        StructureBuilder struc;
+        uint fidx;
+        
         switch (access)
         {
             case InstStField @stfield:
             {
                 var field = stfield.StaticField;
-                var struc = (StructureBuilder)field.Parent!;
-                var fidx = (uint)struc.Fields.IndexOf(field);
-
+                struc = (StructureBuilder)field.Parent!;
+                fidx = (uint)struc.Fields.IndexOf(field);
                 ptrType = field.Type!;
-                return llvmBuilder.BuildStructGEP2(BuilderToTypeRef(struc), from, fidx);
-            }
+            } break;
             
             case InstLdField @ldfield:
             {
                 var field = ldfield.StaticField;
-                var struc = (StructureBuilder)field.Parent!;
-                var fidx = (uint)struc.Fields.IndexOf(field);
-                
+                struc = (StructureBuilder)field.Parent!;
+                fidx = (uint)struc.Fields.IndexOf(field);
                 ptrType = field.Type!;
-                return llvmBuilder.BuildStructGEP2(BuilderToTypeRef(struc), from, fidx);
-            }
+            } break;
 
             default: throw new UnreachableException();
         }
+        
+        fidx += 1; // jump signature
+        if (struc.Extends != null) fidx += 1; // jump annonymous parent field
+        
+        return llvmBuilder.BuildStructGEP2(BuilderToTypeRef(struc), from, fidx);
     }
 
 
@@ -429,30 +444,43 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     private LLVMTypeRef BuilderToTypeRef(StructureBuilder builder) => structures[builder].type;
 
 
-    private LLVMValueRef StoreBufferUtf8(string data)
+    private unsafe LLVMValueRef StoreBufferUtf8(string data)
     {
         var d = Encoding.UTF8.GetBytes(data);
-        return StoreBuffer(LLVMTypeRef.Int8, d.Select(e => (uint)e).ToArray());
+        var alloc = stackalloc ulong[d.Length];
+        for (var i = 0; i < d.Length; i++) alloc[i] = d[i];
+        var span = new ReadOnlySpan<ulong>(alloc, d.Length);
+        
+        return StoreStaticBuffer(LLVMTypeRef.Int8, span);
     }
-    private LLVMValueRef StoreBuffer(LLVMTypeRef elmtype, uint[] data)
+    private LLVMValueRef StoreStaticBuffer(LLVMTypeRef elmtype, ReadOnlySpan<ulong> data)
     {
+        var h = 0; foreach (var i in data) h = HashCode.Combine(h, i);
+        
+        if (staticBufferMap.TryGetValue(h, out var dedup)) return dedup;
+        
         var arrayType = LLVMTypeRef.CreateArray(elmtype, (uint)data.Length);
         var sliceType = CreateSlice(elmtype);
                 
-        var global = llvmModule.AddGlobal(arrayType, "static_data.buffer");
-        var datallvm = data.Select(e => LLVMValueRef.CreateConstInt(elmtype, unchecked((ulong)e))).ToArray();
+        var global = llvmModule.AddGlobal(arrayType, $"ro.static.buffer.{staticBufferMap.Count:0000}");
+        var datallvm = new LLVMValueRef[data.Length];
+        for (var i = 0; i < data.Length; i++) datallvm[i] = LLVMValueRef.CreateConstInt(elmtype, data[i]);
 
         global.Alignment = 1;
         global.Initializer = LLVMValueRef.CreateConstArray(elmtype, datallvm);
-
+        
         var gep = LLVMValueRef.CreateConstInBoundsGEP2(
             LLVMTypeRef.CreatePointer(elmtype, 0), global,
             [LLVMValueRef.CreateConstInt(LLVMTypeRef.Int16, 0),
                 LLVMValueRef.CreateConstInt(LLVMTypeRef.Int16, 0)]);
                 
-        return LLVMValueRef.CreateConstNamedStruct(sliceType, [gep,
+        var ptr = LLVMValueRef.CreateConstNamedStruct(sliceType, [gep,
             LLVMValueRef.CreateConstInt(GetNativeInt(), (ulong)data.Length)]);
+
+        staticBufferMap.Add(h, ptr);
+        return ptr;
     }
+    
     private LLVMTypeRef CreateSlice(LLVMTypeRef elementType) => LLVMTypeRef.CreateStruct([
         LLVMTypeRef.CreatePointer(elementType, 0), GetNativeInt()], false);
     private LLVMTypeRef GetNativeInt() => configuration.NativeIntegerSize switch
@@ -482,7 +510,8 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
 
         return words;
     }
-
+    
+    
     private struct CompileFunctionCtx
     {
         public LLVMValueRef[] args;

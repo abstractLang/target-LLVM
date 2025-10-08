@@ -23,13 +23,13 @@ async function _start()
     };
     
     const wasminstance = (await WebAssembly.instantiateStreaming(wasmcode, rootlibs)).instance;
-    const main = wasminstance.exports["MyProgram.main"];
+    const entrypoint = wasminstance.exports["main"];
 
     std_settings.stdout = append_simple_stdout;
     std_settings.memory = memoryView;
     
     append_stdout("control", "Program started\n");
-    main();
+    entrypoint();
     append_stdout("control", "Program finished\n");
 }
 
