@@ -88,7 +88,9 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         var ttt = LLVMTypeRef.CreateStruct([
             LLVMTypeRef.CreatePointer(GetNativeInt(), 0), // Parent table
             GetNativeInt(), // Type size
+            GetNativeInt(), // Type alignment
             CreateSlice(LLVMTypeRef.Int8), // StructName
+            GetNativeInt(), // Vtable length
             LLVMTypeRef.CreatePointer(GetNativeInt(), 0) // Vtable
         ], true);
         var tt = llvmModule.AddGlobal(ttt, struc.Symbol + ".vtable");
@@ -96,7 +98,7 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     }
     private void UnwrapFunctionHeader(BaseFunctionBuilder baseFunc)
     {
-        if (baseFunc is AbstractFunctionBuilder) return;
+        if (baseFunc is VirtualFunctionBuilder) return;
         
         var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
         var functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes);
@@ -141,22 +143,28 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         List<LLVMTypeRef> fields = [];
         
         fields.Add(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0));
-        if (baseStruct.Extends != null) fields.Add(BuilderToTypeRef(baseStruct.Extends));
+        
+        
+        if (baseStruct.Extends != null)
+            fields.AddRange(baseStruct.Extends.Fields.Select(field => ConvType(field.Type!)));
         fields.AddRange(baseStruct.Fields.Select(field => ConvType(field.Type!)));
         
         llvmStruct.StructSetBody(fields.ToArray(), true);
         
-        
-        LLVMValueRef parentTablePointer = baseStruct.Extends == null
+        var parentTablePointer = baseStruct.Extends == null
             ? LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0))
             : structures[baseStruct.Extends].typetbl;
 
-        
-        typeTbl.Initializer = LLVMValueRef.CreateConstStruct([
+        List<LLVMValueRef> typeTable = [
             parentTablePointer,
             LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Length!.Value),
+            LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Alignment!.Value),
             StoreBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
-        ], true);
+            LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.VTableSize ?? 0),
+        ];
+        
+
+        typeTbl.Initializer = LLVMValueRef.CreateConstStruct([..typeTable], true);
     }
     
     private void CompileFunctions()
