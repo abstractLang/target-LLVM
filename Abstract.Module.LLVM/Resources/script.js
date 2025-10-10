@@ -8,15 +8,17 @@ const webassemblyMainPath = './main.wasm';
 await _start();
 async function _start()
 {
-    const memory = new WebAssembly.Memory({initial: 2});
+    const memory = new WebAssembly.Memory({initial: 1});
     const memoryView = new DataView(memory.buffer);
-    var stackPointer = 0x2000;
+    const table = new WebAssembly.Table({ initial: 16, element: 'anyfunc' });
+    var stackPointer = 0x0FFFF;
 
     const wasmcode = fetch(webassemblyMainPath);
     const rootlibs = {
         env: {
             "__linear_memory": memory,
             "__stack_pointer": new WebAssembly.Global({ value: "i32", mutable: true }, stackPointer),
+            "__indirect_function_table": table,
             "__multi3": i128_multiply
         },
         Std: Std
@@ -28,9 +30,20 @@ async function _start()
     std_settings.stdout = append_simple_stdout;
     std_settings.memory = memoryView;
     
-    append_stdout("control", "Program started\n");
-    entrypoint();
-    append_stdout("control", "Program finished\n");
+    try {
+        append_stdout("control", "Program started\n");
+        entrypoint();
+        append_stdout("control", "Program finished\n");
+    }
+    catch (error) {
+
+        console.log("Memory[44]:", memoryView.getUint32(44, true));
+        console.log("Memory[48]:", memoryView.getUint32(48, true));
+        console.log("Memory[52]:", memoryView.getUint32(52, true));
+        console.log("Memory[116]:", memoryView.getUint32(116, true));
+        
+        append_stdout("error", "An unexpected error occurred: " + error + "\n");
+    }
 }
 
 function append_simple_stdout(text) { append_stdout("", text); }
@@ -50,7 +63,7 @@ function append_stdout(classes, text)
 function allow_stdin(mode)
 {
 
-    if (mode === "ch=aracter") append_stdout("control", "todo allow stdin");
+    if (mode === "character") append_stdout("control", "todo allow stdin");
     else if (mode === "line") append_stdout("control", "todo allow stdin");
 
 }

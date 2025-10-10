@@ -18,6 +18,7 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     
     private Dictionary<BaseFunctionBuilder, (LLVMTypeRef ftype, LLVMValueRef fobj)> functions = [];
     private Dictionary<StructureBuilder, (LLVMTypeRef type, LLVMValueRef typetbl)> structures = [];
+    private Dictionary<StructureBuilder, VirtualFunctionBuilder?[]> vtables = [];
     private Dictionary<string, LLVMValueRef> intrinsincs = [];
     
     private readonly LLVMContextRef llvmContext = ctx;
@@ -39,14 +40,16 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         InitializeIntrinsics();
         foreach (var m in program.Modules) DeclareModuleMembers(m);
         
+        // Order matters here
         CompileFunctions();
         CompileStructs();
         
         var ll = llvmModule.PrintToString();
         File.WriteAllText($".abs-cache/debug/{program.Modules[0].Symbol}.llvmout.ll", ll);
-
+        
         if (!llvmModule.TryVerify(LLVMVerifierFailureAction.LLVMReturnStatusAction, out var msg))
             File.WriteAllText($".abs-cache/debug/{program.Modules[0].Symbol}.llvmdump.txt", msg);
+        
         return llvmModule;
     }
 
@@ -78,6 +81,9 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         // Abstract should have unnested all namespaces!
         foreach (var i in baseModule.Structures) UnwrapStructureHeader(i);
         foreach (var i in baseModule.Functions) UnwrapFunctionHeader(i);
+        
+        foreach (var i in baseModule.Structures
+                     .SelectMany(e => e.Functions)) UnwrapFunctionHeader(i);
     }
 
     
@@ -91,89 +97,64 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             GetNativeInt(), // Type alignment
             CreateSlice(LLVMTypeRef.Int8), // StructName
             GetNativeInt(), // Vtable length
-            LLVMTypeRef.CreatePointer(GetNativeInt(), 0) // Vtable
-        ], true);
+            LLVMTypeRef.CreateArray2(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0), 0),
+        ], false);
         var tt = llvmModule.AddGlobal(ttt, struc.Symbol + ".vtable");
         structures.Add(struc, (st, tt));
+
+        if (struc.VTableSize.HasValue)
+        {
+            var vtlist = new VirtualFunctionBuilder[struc.VTableSize.Value];
+            foreach (var virt in struc.Functions.OfType<VirtualFunctionBuilder>())
+                if (virt.BytecodeBuilder != null) vtlist[virt.Index] = virt;
+            vtables.Add(struc, vtlist);
+        }
     }
     private void UnwrapFunctionHeader(BaseFunctionBuilder baseFunc)
     {
-        if (baseFunc is VirtualFunctionBuilder) return;
-        
         var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
         var functype = LLVMTypeRef.CreateFunction(ConvType(baseFunc.ReturnType), argumentTypes);
-        
-        var fun = llvmModule.AddFunction(baseFunc.Symbol, functype);
-        
-        switch (baseFunc)
+
+        LLVMValueRef fun = default;
+        if (baseFunc is not FunctionBuilder { BytecodeBuilder: null })
         {
-            case FunctionBuilder @func:
+            fun = llvmModule.AddFunction(baseFunc.Symbol, functype);
+            
+            switch (baseFunc)
             {
-                if (func.ExportSymbol != null)
+                case FunctionBuilder @func:
+                {
+                    if (func.ExportSymbol != null)
+                    {
+                        fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                        fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+                        fun.AddTargetDependentFunctionAttr("wasm-export-name", func.ExportSymbol);
+                    }
+                }
+                    break;
+
+                case ImportedFunctionBuilder importedFunc:
                 {
                     fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
-                    fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
-                    fun.AddTargetDependentFunctionAttr("wasm-export-name", func.ExportSymbol);
-                }
-            } break;
+                    fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
 
-            case ImportedFunctionBuilder importedFunc:
-            {
-                fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
-                fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
-                
-                fun.AddTargetDependentFunctionAttr("wasm-import-module", importedFunc.ImportDomain ?? "env");
-                fun.AddTargetDependentFunctionAttr("wasm-import-name", importedFunc.ImportSymbol!);
-            } break;
-            
-            default: throw new UnreachableException();
+                    fun.AddTargetDependentFunctionAttr("wasm-import-module", importedFunc.ImportDomain ?? "env");
+                    fun.AddTargetDependentFunctionAttr("wasm-import-name", importedFunc.ImportSymbol!);
+                }
+                    break;
+
+                default: throw new UnreachableException();
+            }
         }
-        
+
         functions.Add(baseFunc, (functype, fun));
     }
 
-
-    private void CompileStructs()
-    {
-        foreach (var (baseStruct, (llvmStruct, tt)) in structures)
-            CompileStruct(baseStruct, llvmStruct, tt);
-    }
-    private void CompileStruct(StructureBuilder baseStruct, LLVMTypeRef llvmStruct, LLVMValueRef typeTbl)
-    {
-        List<LLVMTypeRef> fields = [];
-        
-        fields.Add(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0));
-        
-        
-        if (baseStruct.Extends != null)
-            fields.AddRange(baseStruct.Extends.Fields.Select(field => ConvType(field.Type!)));
-        fields.AddRange(baseStruct.Fields.Select(field => ConvType(field.Type!)));
-        
-        llvmStruct.StructSetBody(fields.ToArray(), true);
-        
-        var parentTablePointer = baseStruct.Extends == null
-            ? LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0))
-            : structures[baseStruct.Extends].typetbl;
-
-        List<LLVMValueRef> typeTable = [
-            parentTablePointer,
-            LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Length!.Value),
-            LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Alignment!.Value),
-            StoreBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
-            LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.VTableSize ?? 0),
-        ];
-        
-
-        typeTbl.Initializer = LLVMValueRef.CreateConstStruct([..typeTable], true);
-    }
     
     private void CompileFunctions()
     {
         foreach (var (baseFunction, (llvmFuncType, llvmFunction)) in functions)
-        {
-            if (baseFunction is not FunctionBuilder @fb) continue;
-            CompileFunction(fb, llvmFunction);
-        }
+            if (baseFunction is FunctionBuilder @fb && fb.BytecodeBuilder != null) CompileFunction(fb, llvmFunction);
     }
     private void CompileFunction(FunctionBuilder baseFunc, LLVMValueRef llvmFunction)
     {
@@ -211,6 +192,62 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         while (body.Count > 0) CompileFunctionInstruction(ctx);
     }
 
+    
+    private void CompileStructs()
+    {
+        foreach (var (baseStruct, (llvmStruct, tt)) in structures)
+            CompileStruct(baseStruct, llvmStruct, tt);
+    }
+    private void CompileStruct(StructureBuilder baseStruct, LLVMTypeRef llvmStruct, LLVMValueRef typeTbl)
+    {
+        List<LLVMTypeRef> fields = [];
+        
+        fields.Add(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0));
+        if (baseStruct.Extends != null)
+            fields.AddRange(baseStruct.Extends.Fields.Select(field => ConvType(field.Type!)));
+        fields.AddRange(baseStruct.Fields.Select(field => ConvType(field.Type!)));
+        
+        llvmStruct.StructSetBody(fields.ToArray(), false);
+        
+        var parentTablePointer = baseStruct.Extends == null
+            ? LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0))
+            : structures[baseStruct.Extends].typetbl;
+
+        List<LLVMValueRef> values = []; 
+
+        var selfvtable = vtables[baseStruct];
+        for (var i = 0; i < (baseStruct.VTableSize ?? 0); i++)
+        {
+            if (selfvtable[i] != null) continue;
+            StructureBuilder? curr = baseStruct;
+            while (curr != null)
+            {
+                var tab = vtables[curr];
+                if (tab[i] != null)
+                {
+                    if (functions.ContainsKey(tab[i])) selfvtable[i] = tab[i];
+                    break;
+                }
+                curr = curr.Extends;
+            }
+        }
+        
+        values.AddRange(selfvtable.Select(i => i == null
+            ? LLVMValueRef.CreateConstPointerNull(LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0))
+            : functions[i].fobj));
+        
+        typeTbl.Initializer = LLVMValueRef.CreateConstStruct([
+                parentTablePointer,
+                LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Length!.Value),
+                LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Alignment!.Value),
+                StoreBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
+                LLVMValueRef.CreateConstArray(
+                    LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0), [.. values]),
+        ], false);
+    }
+
+    
+    
     private void CompileFunctionInstruction(CompileFunctionCtx ctx)
     {
         var a = ctx.body.Peek();
@@ -255,7 +292,9 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         
         switch (a)
         {
-            case InstLdConstIptr: throw new Exception("iptrs should've already been reassigned to a valid integer size");
+            case InstLdConstIptr @ldconstptr:
+                val = LLVMValueRef.CreateConstInt(GetNativeInt(), unchecked((ulong)(Int128)ldconstptr.Value), true);
+                break;
             case InstLdConstI @ldconstix:
             {
                 val = ldconstix.Len switch
@@ -312,16 +351,47 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             case InstCall @call:
             {
                 List<LLVMValueRef> argsList = [];
-                
-                for (var i = 0; i < call.function.Parameters.Count; i++) 
-                    argsList.Add(CompileFunctionValue(ctx));
+                (LLVMTypeRef ftype, LLVMValueRef fun) funck = (default, default);
 
-                var funck = BuilderToValueRef(call.function);
+                switch (call.function)
+                {
+                    case VirtualFunctionBuilder @virt:
+                    {
+                        var functype = functions[virt].ftype;
+                        var instance = CompileFunctionValue(ctx);
+                        
+                        argsList.Add(instance);
+                        for (var i = 1; i < call.function.Parameters.Count; i++) 
+                            argsList.Add(CompileFunctionValue(ctx));
+
+                        var t = structures[(StructureBuilder)virt.Parent!].typetbl.TypeOf;
+                        var addr = llvmBuilder.BuildInBoundsGEP2(
+                            LLVMTypeRef.CreatePointer(LLVMTypeRef.Void, 0), instance,
+                            [
+                                //LLVMValueRef.CreateConstInt(LLVMTypeRef.Int64, 0),
+                                LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 5 + virt.Index),
+                                //LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 5 + virt.Index),
+                            ]);
+                        var func = llvmBuilder.BuildLoad2(LLVMTypeRef.CreatePointer(functype, 0), addr);
+                        
+                        funck = (functype, func);
+                            
+                    } break;
+
+                    default:
+                    {
+                        for (var i = 0; i < call.function.Parameters.Count; i++) 
+                            argsList.Add(CompileFunctionValue(ctx));
+
+                        funck = BuilderToValueRef(call.function);
+                    } break;
+                }
                 
                 val = llvmBuilder.BuildCall2(
                     funck.ftype,
                     funck.fun,
                     argsList.ToArray());
+                
             } break;
             
             default: throw new UnreachableException();
@@ -368,10 +438,10 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             case InstXor: return llvmBuilder.BuildXor(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
             
             case InstConv: return llvmBuilder.BuildIntCast(CompileFunctionValue(ctx), ConvType(ty));
-            case InstExtend:
-                return (((IntegerTypeReference)ty).Signed)
+            case InstExtend: return (((IntegerTypeReference)ty).Signed)
                     ? llvmBuilder.BuildSExt(CompileFunctionValue(ctx), ConvType(ty))
                     : llvmBuilder.BuildZExt(CompileFunctionValue(ctx), ConvType(ty));
+            
             case InstTrunc: return llvmBuilder.BuildTrunc(CompileFunctionValue(ctx), ConvType(ty));
             case InstSigcast: return CompileFunctionValue(ctx); // LLVM handles signess in context
             
@@ -411,7 +481,10 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         fidx += 1; // jump signature
         if (struc.Extends != null) fidx += 1; // jump annonymous parent field
         
-        return llvmBuilder.BuildStructGEP2(BuilderToTypeRef(struc), from, fidx);
+        return llvmBuilder.BuildGEP2(BuilderToTypeRef(struc), from, [
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, 0),
+            LLVMValueRef.CreateConstInt(LLVMTypeRef.Int32, fidx),
+        ]);
     }
 
 
@@ -461,7 +534,7 @@ internal class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         
         return StoreStaticBuffer(LLVMTypeRef.Int8, span);
     }
-    private LLVMValueRef StoreStaticBuffer(LLVMTypeRef elmtype, ReadOnlySpan<ulong> data)
+    private LLVMValueRef StoreStaticBuffer(LLVMTypeRef elmtype, ReadOnlySpan<ulong> data) 
     {
         var h = 0; foreach (var i in data) h = HashCode.Combine(h, i);
         

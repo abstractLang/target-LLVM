@@ -52,5 +52,7 @@ public static class TargetWasm
         File.Copy(Path.Combine(exeDir, "Resources/index.html"), ".abs-out/index.html", true);
         File.Copy(Path.Combine(exeDir, "Resources/script.js"), ".abs-out/script.js", true);
         File.Copy(Path.Combine(exeDir, "Resources/std.js"), ".abs-out/std.js", true);
+
+        foreach (var i in modules) i.Dispose();
     }
 }
