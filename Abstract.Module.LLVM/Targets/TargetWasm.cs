@@ -13,7 +13,7 @@ public static class TargetWasm
         
         Console.WriteLine("Compiling to WASM with LLVM...");
         
-        var ctx = LLVMContextRef.Global;
+        var ctx = LLVMContextRef.Create();
         
         var llvmCompiler = new LlvmCompiler(ctx, TargetsList.Wasm);
         LLVMModuleRef[] modules = [llvmCompiler.Compile(program, config)];
