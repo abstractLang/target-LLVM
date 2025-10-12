@@ -280,13 +280,24 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 Queue<IOmegaInstruction> iftrueInsts = [];
                 Queue<IOmegaInstruction> iffalseInsts = [];
 
-                while (ctx.Body.Peek() is not InstElse and not InstEnd)
+                var ifstack = 0;
+                while (true)
+                {
+                    if (ctx.Body.Peek() is InstElse or InstEnd && --ifstack < 0) break;
+                    if (ctx.Body.Peek() is InstIf) ifstack++;
                     iftrueInsts.Enqueue(ctx.Body.Dequeue());
+                }
 
+                ifstack = 0;
                 if (ctx.Body.Dequeue() is not InstEnd)
                 {
-                    while (ctx.Body.Peek() is not InstEnd)
+                    while (true)
+                    {
+                        if (ctx.Body.Peek() is InstEnd && --ifstack < 0) break;
+                        if (ctx.Body.Peek() is InstIf) ifstack++;
                         iffalseInsts.Enqueue(ctx.Body.Dequeue());
+                    }
+
                     ctx.Body.Dequeue();
                 }
 
@@ -297,7 +308,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 _llvmBuilder.BuildCondBr(condition, trueblock, falseblock.Handle != 0 ? falseblock : breakblock);
                 
                 _llvmBuilder.PositionAtEnd(trueblock);
-                var subctx = new CompileFunctionCtx(null)
+                var subctx = new CompileFunctionCtx(ctx)
                 {
                     Function = ctx.Function,
                     Args = ctx.Args,
@@ -310,7 +321,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 if (falseblock != null)
                 {
                     _llvmBuilder.PositionAtEnd(falseblock);
-                    subctx = new CompileFunctionCtx(null)
+                    subctx = new CompileFunctionCtx(ctx)
                     {
                         Function = ctx.Function,
                         Args = ctx.Args,
