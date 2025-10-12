@@ -169,8 +169,9 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             {
                 var local = _llvmBuilder.BuildAlloca(paramValue.TypeOf);
                 var store = _llvmBuilder.BuildStore(paramValue, local);
-                local.SetAlignment((type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-                store.SetAlignment((type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                var align = Math.Max(1, (type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                local.SetAlignment(align);
+                store.SetAlignment(align);
                 
                 paramValue = local;
             }
@@ -178,17 +179,16 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             args[i] = paramValue;
         }
         
-        List<(TypeReference, LLVMValueRef)> locals = [];
         var body = new Queue<IOmegaInstruction>((baseFunc.BytecodeBuilder as OmegaBytecodeBuilder 
                                                  ?? throw new Exception("Expected OmegaBytecodeBuilder")).InstructionsList);
 
-        var ctx = new CompileFunctionCtx
+        var ctx = new CompileFunctionCtx(null)
         {
+            Function = llvmFunction,
             Args = args,
-            Locals = locals,
+            _selfLocals = [],
             Body = body,
         };
-        
         while (body.Count > 0) CompileFunctionInstruction(ctx);
     }
 
@@ -255,10 +255,11 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             case MacroDefineLocal @deflocal:
             {
                 var alloca = _llvmBuilder.BuildAlloca(ConvType(deflocal.Type));
-                alloca.SetAlignment((deflocal.Type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                var align = Math.Max(1, (deflocal.Type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                alloca.SetAlignment(align);
                 
                 ctx.Body.Dequeue();
-                ctx.Locals.Add((deflocal.Type, alloca));
+                ctx._selfLocals.Add((deflocal.Type, alloca));
             } break;
 
             case InstStLocal @stlocal:
@@ -267,8 +268,60 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 var val = CompileFunctionValueNullable(ctx);
                 if (!val.HasValue) return;
                 var store = _llvmBuilder.BuildStore(val.Value, ctx.Locals[stlocal.index].ptr);
-                store.SetAlignment((ctx.Locals[stlocal.index].type.Alignment ?? _configuration.NativeIntegerSize)
-                                   / _configuration.MemoryUnit);
+                var align = Math.Max(1, (ctx.Locals[stlocal.index].type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                store.SetAlignment(align);
+            } break;
+
+            case InstIf:
+            {
+                ctx.Body.Dequeue();
+                var condition = CompileFunctionValue(ctx);
+
+                Queue<IOmegaInstruction> iftrueInsts = [];
+                Queue<IOmegaInstruction> iffalseInsts = [];
+
+                while (ctx.Body.Peek() is not InstElse and not InstEnd)
+                    iftrueInsts.Enqueue(ctx.Body.Dequeue());
+
+                if (ctx.Body.Dequeue() is not InstEnd)
+                {
+                    while (ctx.Body.Peek() is not InstEnd)
+                        iffalseInsts.Enqueue(ctx.Body.Dequeue());
+                    ctx.Body.Dequeue();
+                }
+
+                var trueblock = LLVMAppendBasicBlock(ctx.Function, "a");
+                var falseblock = iffalseInsts.Count > 0 ? LLVMAppendBasicBlock(ctx.Function, "b") : default;
+                var breakblock = LLVMAppendBasicBlock(ctx.Function, "c");
+
+                _llvmBuilder.BuildCondBr(condition, trueblock, falseblock.Handle != 0 ? falseblock : breakblock);
+                
+                _llvmBuilder.PositionAtEnd(trueblock);
+                var subctx = new CompileFunctionCtx(null)
+                {
+                    Function = ctx.Function,
+                    Args = ctx.Args,
+                    _selfLocals = [],
+                    Body = iftrueInsts,
+                };
+                while (iftrueInsts.Count > 0) CompileFunctionInstruction(subctx);
+                _llvmBuilder.BuildBr(breakblock);
+
+                if (falseblock != null)
+                {
+                    _llvmBuilder.PositionAtEnd(falseblock);
+                    subctx = new CompileFunctionCtx(null)
+                    {
+                        Function = ctx.Function,
+                        Args = ctx.Args,
+                        _selfLocals = [],
+                        Body = iffalseInsts,
+                    };
+                    while (iffalseInsts.Count > 0) CompileFunctionInstruction(subctx);
+                    _llvmBuilder.BuildBr(breakblock);
+                }
+                
+                _llvmBuilder.PositionAtEnd(breakblock);
             } break;
             
             default:
@@ -405,7 +458,8 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 ctx.Body.Dequeue();
                 var tostore = CompileFunctionValue(ctx);
                 val = _llvmBuilder.BuildStore(tostore, ptr);
-                val.SetAlignment((holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                var align = Math.Max(1, (holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                val.SetAlignment(align);
                 holding = null;
                 break;
             }
@@ -414,7 +468,8 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
 
         if (holding == null) return val;
         val = _llvmBuilder.BuildLoad2(ConvType(holding), val);
-        val.SetAlignment((holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+        var align2 = Math.Max(1, (holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+        val.SetAlignment(align2);
         return val;
     }
 
@@ -584,10 +639,17 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     }
     
     
-    private struct CompileFunctionCtx
+    private class CompileFunctionCtx(CompileFunctionCtx? parent)
     {
+        private CompileFunctionCtx? _parent = parent;
+        public LLVMValueRef Function;
+        
         public LLVMValueRef[] Args;
-        public List<(TypeReference type, LLVMValueRef ptr)> Locals;
         public Queue<IOmegaInstruction> Body;
+        
+        public List<(TypeReference type, LLVMValueRef ptr)> _selfLocals;
+        public (TypeReference type, LLVMValueRef ptr)[] Locals => parent != null
+            ? [.. parent.Locals, .. _selfLocals]
+            : [.. _selfLocals];
     }
 }
