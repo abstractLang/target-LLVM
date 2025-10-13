@@ -106,7 +106,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         {
             var vtlist = new VirtualFunctionBuilder[struc.VTableSize.Value];
             foreach (var virt in struc.Functions.OfType<VirtualFunctionBuilder>())
-                if (virt.BytecodeBuilder != null) vtlist[virt.Index] = virt;
+                if (virt.CodeBlocks.Count == 0) vtlist[virt.Index] = virt;
             _vtables.Add(struc, vtlist);
         }
     }
@@ -115,81 +115,99 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.type)).ToArray();
         var functype = LlvmFunctionType(ConvType(baseFunc.ReturnType), argumentTypes);
 
-        LLVMValueRef fun = default;
-        if (baseFunc is not FunctionBuilder { BytecodeBuilder: null })
+        if (baseFunc is VirtualFunctionBuilder { CodeBlocks.Count: 0 })
         {
-            fun = _llvmModule.AddFunction(baseFunc.Symbol, functype);
-            
-            switch (baseFunc)
-            {
-                case FunctionBuilder @func:
-                {
-                    if (func.ExportSymbol != null)
-                    {
-                        fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
-                        fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
-                        fun.AddTargetDependentFunctionAttr("wasm-export-name", func.ExportSymbol);
-                    }
-                }
-                    break;
-
-                case ImportedFunctionBuilder importedFunc:
-                {
-                    fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
-                    fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
-
-                    fun.AddTargetDependentFunctionAttr("wasm-import-module", importedFunc.ImportDomain ?? "env");
-                    fun.AddTargetDependentFunctionAttr("wasm-import-name", importedFunc.ImportSymbol!);
-                }
-                    break;
-
-                default: throw new UnreachableException();
-            }
+            _functions.Add(baseFunc, (functype, default));
+            return;
         }
 
+        LLVMValueRef fun = _llvmModule.AddFunction(baseFunc.Symbol, functype);
+        switch (baseFunc)
+        {
+            case FunctionBuilder @func:
+            {
+                if (func.ExportSymbol != null)
+                {
+                    fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                    fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+                    fun.AddTargetDependentFunctionAttr("wasm-export-name", func.ExportSymbol);
+                }
+            }
+                break;
+
+            case ImportedFunctionBuilder importedFunc:
+            {
+                fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
+                fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
+
+                fun.AddTargetDependentFunctionAttr("wasm-import-module", importedFunc.ImportDomain ?? "env");
+                fun.AddTargetDependentFunctionAttr("wasm-import-name", importedFunc.ImportSymbol!);
+            }
+                break;
+
+            default: throw new UnreachableException();
+        }
         _functions.Add(baseFunc, (functype, fun));
+        
     }
 
     
     private void CompileFunctions()
     {
         foreach (var (baseFunction, (llvmFuncType, llvmFunction)) in _functions)
-            if (baseFunction is FunctionBuilder @fb && fb.BytecodeBuilder != null) CompileFunction(fb, llvmFunction);
+            if (baseFunction is FunctionBuilder { CodeBlocks.Count: > 0 } @fb) CompileFunction(fb, llvmFunction);
     }
     private void CompileFunction(FunctionBuilder baseFunc, LLVMValueRef llvmFunction)
     {
-        var entry = LLVMAppendBasicBlock(llvmFunction, "entry");
-        _llvmBuilder.PositionAtEnd(entry);
-        
         var args = new LLVMValueRef[llvmFunction.ParamsCount];
-        foreach (var (i, (_, type)) in baseFunc.Parameters.Index())
-        {
-            var paramValue = llvmFunction.GetParam((uint)i);
-            if (type is NodeTypeReference { TypeReference: StructureBuilder })
-            {
-                var local = _llvmBuilder.BuildAlloca(paramValue.TypeOf);
-                var store = _llvmBuilder.BuildStore(paramValue, local);
-                var align = Math.Max(1, (type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-                local.SetAlignment(align);
-                store.SetAlignment(align);
-                
-                paramValue = local;
-            }
-
-            args[i] = paramValue;
-        }
         
-        var body = new Queue<IOmegaInstruction>((baseFunc.BytecodeBuilder as OmegaBytecodeBuilder 
-                                                 ?? throw new Exception("Expected OmegaBytecodeBuilder")).InstructionsList);
-
-        var ctx = new CompileFunctionCtx(null)
+        var codeBlocks = new (OmegaBlockBuilder baseBlock, LLVMBasicBlockRef llvmBlock)[baseFunc.CodeBlocks.Count];
+        foreach (var (i, block) in baseFunc.CodeBlocks.Index())
         {
-            Function = llvmFunction,
-            Args = args,
-            _selfLocals = [],
-            Body = body,
-        };
-        while (body.Count > 0) CompileFunctionInstruction(ctx);
+            if (block is not OmegaBlockBuilder @omega) throw new Exception("Expected OmegaBytecodeBuilder");
+            
+            var llvmblock = LLVMAppendBasicBlock(llvmFunction, block.Name);
+            codeBlocks[i] = (omega, llvmblock);
+        }
+
+        if (codeBlocks.Length > 0)
+        {
+            _llvmBuilder.PositionAtEnd(codeBlocks[0].llvmBlock);
+            foreach (var (i, (_, type)) in baseFunc.Parameters.Index())
+            {
+                var paramValue = llvmFunction.GetParam((uint)i);
+                if (type is NodeTypeReference { TypeReference: StructureBuilder })
+                {
+                    var local = _llvmBuilder.BuildAlloca(paramValue.TypeOf);
+                    var store = _llvmBuilder.BuildStore(paramValue, local);
+                    var align = Math.Max(1, (type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                    local.SetAlignment(align);
+                    store.SetAlignment(align);
+                
+                    paramValue = local;
+                }
+
+                args[i] = paramValue;
+            }
+        }
+
+        List<(TypeReference type, LLVMValueRef ptr)> functionLocals = [];
+        
+        foreach (var (baseblock, llvmblock) in codeBlocks)
+        {
+            var body = new Queue<IOmegaInstruction>(baseblock.InstructionsList);
+            var ctx = new CompileCodeBlockCtx(null)
+            {
+                Function = llvmFunction,
+                BlockMap = codeBlocks,
+                Args = args,
+                _selfLocals = functionLocals,
+                Body = body,
+            };
+            
+            _llvmBuilder.PositionAtEnd(llvmblock);
+            while (body.Count > 0) CompileCodeBlockInstruction(ctx);
+        }
     }
 
     
@@ -216,14 +234,19 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         var selfvtable = _vtables[baseStruct];
         for (var i = 0; i < (baseStruct.VTableSize ?? 0); i++)
         {
-            if (selfvtable[i] != null) continue;
+            if (selfvtable[i] != null)
+            {
+                if (selfvtable[i].CodeBlocks.Count == 0) selfvtable[i] = null;
+                continue;
+            }
             StructureBuilder? curr = baseStruct;
             while (curr != null)
             {
                 var tab = _vtables[curr];
                 if (tab[i] != null)
                 {
-                    if (_functions.ContainsKey(tab[i])) selfvtable[i] = tab[i];
+                    if (tab[i].CodeBlocks.Count == 0) selfvtable[i] = null;
+                    else if (_functions.ContainsKey(tab[i])) selfvtable[i] = tab[i];
                     break;
                 }
                 curr = curr.Extends;
@@ -240,14 +263,14 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             parentTablePointer,
             LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Length!.Value),
             LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Alignment!.Value),
-            StoreBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
+            StoreStaticBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
             LLVMValueRef.CreateConstInt(GetNativeInt(), (ulong)selfvtable.Length),
             LLVMValueRef.CreateConstArray(LlvmOpaquePtr, [..values]),
         ], false);
     }
 
     
-    private void CompileFunctionInstruction(CompileFunctionCtx ctx)
+    private void CompileCodeBlockInstruction(CompileCodeBlockCtx ctx)
     {
         var a = ctx.Body.Peek();
         switch (a)
@@ -265,89 +288,44 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             case InstStLocal @stlocal:
             {
                 ctx.Body.Dequeue();
-                var val = CompileFunctionValueNullable(ctx);
+                var val = CompileCodeBlockValueNullable(ctx);
                 if (!val.HasValue) return;
                 var store = _llvmBuilder.BuildStore(val.Value, ctx.Locals[stlocal.index].ptr);
                 var align = Math.Max(1, (ctx.Locals[stlocal.index].type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
                 store.SetAlignment(align);
             } break;
 
-            case InstIf:
+            case InstBranch @branch:
             {
                 ctx.Body.Dequeue();
-                var condition = CompileFunctionValue(ctx);
+                var toblock = ctx.BlockMap[branch.To];
+                _llvmBuilder.BuildBr(toblock.llvmb);
+            } break;
 
-                Queue<IOmegaInstruction> iftrueInsts = [];
-                Queue<IOmegaInstruction> iffalseInsts = [];
+            case InstBranchIf @branchif:
+            {
+                ctx.Body.Dequeue();
+                var condition = CompileCodeBlockValue(ctx);
 
-                var ifstack = 0;
-                while (true)
-                {
-                    if (ctx.Body.Peek() is InstElse or InstEnd && --ifstack < 0) break;
-                    if (ctx.Body.Peek() is InstIf) ifstack++;
-                    iftrueInsts.Enqueue(ctx.Body.Dequeue());
-                }
-
-                ifstack = 0;
-                if (ctx.Body.Dequeue() is not InstEnd)
-                {
-                    while (true)
-                    {
-                        if (ctx.Body.Peek() is InstEnd && --ifstack < 0) break;
-                        if (ctx.Body.Peek() is InstIf) ifstack++;
-                        iffalseInsts.Enqueue(ctx.Body.Dequeue());
-                    }
-
-                    ctx.Body.Dequeue();
-                }
-
-                var trueblock = LLVMAppendBasicBlock(ctx.Function, "a");
-                var falseblock = iffalseInsts.Count > 0 ? LLVMAppendBasicBlock(ctx.Function, "b") : default;
-                var breakblock = LLVMAppendBasicBlock(ctx.Function, "c");
-
-                _llvmBuilder.BuildCondBr(condition, trueblock, falseblock.Handle != 0 ? falseblock : breakblock);
+                var trueblock = ctx.BlockMap[branchif.IfTrue];
+                var falseblock = ctx.BlockMap[branchif.IfFalse];
                 
-                _llvmBuilder.PositionAtEnd(trueblock);
-                var subctx = new CompileFunctionCtx(ctx)
-                {
-                    Function = ctx.Function,
-                    Args = ctx.Args,
-                    _selfLocals = [],
-                    Body = iftrueInsts,
-                };
-                while (iftrueInsts.Count > 0) CompileFunctionInstruction(subctx);
-                _llvmBuilder.BuildBr(breakblock);
-
-                if (falseblock != null)
-                {
-                    _llvmBuilder.PositionAtEnd(falseblock);
-                    subctx = new CompileFunctionCtx(ctx)
-                    {
-                        Function = ctx.Function,
-                        Args = ctx.Args,
-                        _selfLocals = [],
-                        Body = iffalseInsts,
-                    };
-                    while (iffalseInsts.Count > 0) CompileFunctionInstruction(subctx);
-                    _llvmBuilder.BuildBr(breakblock);
-                }
-                
-                _llvmBuilder.PositionAtEnd(breakblock);
+                _llvmBuilder.BuildCondBr(condition, trueblock.llvmb, falseblock.llvmb);
             } break;
             
             default:
-                CompileFunctionValue(ctx);
+                CompileCodeBlockValue(ctx);
                 break;
         }
     }
 
-    private LLVMValueRef CompileFunctionValue(CompileFunctionCtx ctx)
+    private LLVMValueRef CompileCodeBlockValue(CompileCodeBlockCtx ctx)
     {
-        var v = CompileFunctionValueNullable(ctx);
+        var v = CompileCodeBlockValueNullable(ctx);
         if (v.HasValue) return v.Value;
         throw new UnreachableException();
     }
-    private LLVMValueRef? CompileFunctionValueNullable(CompileFunctionCtx ctx)
+    private LLVMValueRef? CompileCodeBlockValueNullable(CompileCodeBlockCtx ctx)
     {
         var a = ctx.Body.Dequeue();
         LLVMValueRef val;
@@ -373,8 +351,8 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 break;
             }
 
-            case InstLdStringUtf8 @str:
-                return StoreBufferUtf8(str.Value);
+            case InstLdSlice @slice:
+                return StoreStaticByteBuffer(slice.Content);
             
             case InstLdLocal @ldlocal:
                 if (ldlocal.Local < 0) val = ctx.Args[(-ldlocal.Local) - 1];
@@ -402,13 +380,13 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
 
             case InstRet @r:
                 return r.value
-                    ? _llvmBuilder.BuildRet(CompileFunctionValue(ctx))
+                    ? _llvmBuilder.BuildRet(CompileCodeBlockValue(ctx))
                     : _llvmBuilder.BuildRetVoid();
             
             case FlagTypeInt @tint:
             {
                 var ty = new IntegerTypeReference(tint.Signed, tint.Size);
-                return CompileFunctionValueTyped(ctx, ty);
+                return CompileCodeBlockValueTyped(ctx, ty);
             }
 
             case InstCall @call:
@@ -421,11 +399,11 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                     case VirtualFunctionBuilder @virt:
                     {
                         var functype = _functions[virt].ftype;
-                        var instance = CompileFunctionValue(ctx);
+                        var instance = CompileCodeBlockValue(ctx);
                         
                         argsList.Add(instance);
                         for (var i = 1; i < call.function.Parameters.Count; i++) 
-                            argsList.Add(CompileFunctionValue(ctx));
+                            argsList.Add(CompileCodeBlockValue(ctx));
 
                         var tableType = _structures[(StructureBuilder)virt.Parent!].typetbl.TypeOf;
                         var instanceType = _structures[(StructureBuilder)virt.Parent!].typetbl;
@@ -439,17 +417,13 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                     default:
                     {
                         for (var i = 0; i < call.function.Parameters.Count; i++) 
-                            argsList.Add(CompileFunctionValue(ctx));
+                            argsList.Add(CompileCodeBlockValue(ctx));
 
                         funck = BuilderToValueRef(call.function);
                     } break;
                 }
                 
-                val = _llvmBuilder.BuildCall2(
-                    funck.ftype,
-                    funck.fun,
-                    argsList.ToArray());
-                
+                val = _llvmBuilder.BuildCall2(funck.ftype, funck.fun, argsList.ToArray());
             } break;
             
             default: throw new UnreachableException();
@@ -467,7 +441,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             {
                 var ptr = GetFieldPtr(val, curr, out holding);
                 ctx.Body.Dequeue();
-                var tostore = CompileFunctionValue(ctx);
+                var tostore = CompileCodeBlockValue(ctx);
                 val = _llvmBuilder.BuildStore(tostore, ptr);
                 var align = Math.Max(1, (holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
                 val.SetAlignment(align);
@@ -484,26 +458,26 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         return val;
     }
 
-    private LLVMValueRef CompileFunctionValueTyped(CompileFunctionCtx ctx, TypeReference ty)
+    private LLVMValueRef CompileCodeBlockValueTyped(CompileCodeBlockCtx ctx, TypeReference ty)
     {
         var a = ctx.Body.Dequeue();
         switch (a)
         {
-            case InstAdd: return _llvmBuilder.BuildAdd(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            case InstAdd: return _llvmBuilder.BuildAdd(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             
-            case InstMul: return _llvmBuilder.BuildMul(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            case InstMul: return _llvmBuilder.BuildMul(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
 
-            case InstAnd: return _llvmBuilder.BuildAnd(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
-            case InstOr: return _llvmBuilder.BuildOr(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
-            case InstXor: return _llvmBuilder.BuildXor(CompileFunctionValue(ctx), CompileFunctionValue(ctx));
+            case InstAnd: return _llvmBuilder.BuildAnd(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstOr: return _llvmBuilder.BuildOr(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstXor: return _llvmBuilder.BuildXor(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             
-            case InstConv: return _llvmBuilder.BuildIntCast(CompileFunctionValue(ctx), ConvType(ty));
+            case InstConv: return _llvmBuilder.BuildIntCast(CompileCodeBlockValue(ctx), ConvType(ty));
             case InstExtend: return (((IntegerTypeReference)ty).Signed)
-                    ? _llvmBuilder.BuildSExt(CompileFunctionValue(ctx), ConvType(ty))
-                    : _llvmBuilder.BuildZExt(CompileFunctionValue(ctx), ConvType(ty));
+                    ? _llvmBuilder.BuildSExt(CompileCodeBlockValue(ctx), ConvType(ty))
+                    : _llvmBuilder.BuildZExt(CompileCodeBlockValue(ctx), ConvType(ty));
             
-            case InstTrunc: return _llvmBuilder.BuildTrunc(CompileFunctionValue(ctx), ConvType(ty));
-            case InstSigcast: return CompileFunctionValue(ctx); // LLVM handles signess in context
+            case InstTrunc: return _llvmBuilder.BuildTrunc(CompileCodeBlockValue(ctx), ConvType(ty));
+            case InstSigcast: return CompileCodeBlockValue(ctx); // LLVM handles signess in context
             
             default: throw new UnreachableException();
         }
@@ -581,13 +555,13 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     private (LLVMTypeRef ftype, LLVMValueRef fun) BuilderToValueRef(BaseFunctionBuilder builder) => _functions[builder];
     private LLVMTypeRef BuilderToTypeRef(StructureBuilder builder) => _structures[builder].type;
 
-
-    private unsafe LLVMValueRef StoreBufferUtf8(string data)
+    
+    private LLVMValueRef StoreStaticBufferUtf8(string data) => StoreStaticByteBuffer(Encoding.UTF8.GetBytes(data));
+    private unsafe LLVMValueRef StoreStaticByteBuffer(byte[] data)
     {
-        var d = Encoding.UTF8.GetBytes(data);
-        var alloc = stackalloc ulong[d.Length];
-        for (var i = 0; i < d.Length; i++) alloc[i] = d[i];
-        var span = new ReadOnlySpan<ulong>(alloc, d.Length);
+        var alloc = stackalloc ulong[data.Length];
+        for (var i = 0; i < data.Length; i++) alloc[i] = data[i];
+        var span = new ReadOnlySpan<ulong>(alloc, data.Length);
         
         return StoreStaticBuffer(LlvmInt8, span);
     }
@@ -650,10 +624,11 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     }
     
     
-    private class CompileFunctionCtx(CompileFunctionCtx? parent)
+    private class CompileCodeBlockCtx(CompileCodeBlockCtx? parent)
     {
-        private CompileFunctionCtx? _parent = parent;
+        private CompileCodeBlockCtx? _parent = parent;
         public LLVMValueRef Function;
+        public (OmegaBlockBuilder baseb, LLVMBasicBlockRef llvmb)[] BlockMap;
         
         public LLVMValueRef[] Args;
         public Queue<IOmegaInstruction> Body;
