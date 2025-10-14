@@ -191,17 +191,17 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             }
         }
 
-        List<(TypeReference type, LLVMValueRef ptr)> functionLocals = [];
+        List<(TypeReference type, LLVMValueRef ptr)> locals = [];
         
         foreach (var (baseblock, llvmblock) in codeBlocks)
         {
             var body = new Queue<IOmegaInstruction>(baseblock.InstructionsList);
-            var ctx = new CompileCodeBlockCtx(null)
+            var ctx = new CompileCodeBlockCtx()
             {
                 Function = llvmFunction,
                 BlockMap = codeBlocks,
                 Args = args,
-                _selfLocals = functionLocals,
+                Locals = locals,
                 Body = body,
             };
             
@@ -282,7 +282,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 alloca.SetAlignment(align);
                 
                 ctx.Body.Dequeue();
-                ctx._selfLocals.Add((deflocal.Type, alloca));
+                ctx.Locals.Add((deflocal.Type, alloca));
             } break;
 
             case InstStLocal @stlocal:
@@ -641,18 +641,14 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     }
     
     
-    private class CompileCodeBlockCtx(CompileCodeBlockCtx? parent)
+    private class CompileCodeBlockCtx()
     {
-        private CompileCodeBlockCtx? _parent = parent;
         public LLVMValueRef Function;
         public (OmegaBlockBuilder baseb, LLVMBasicBlockRef llvmb)[] BlockMap;
         
         public LLVMValueRef[] Args;
+        public List<(TypeReference type, LLVMValueRef ptr)> Locals;
         public Queue<IOmegaInstruction> Body;
         
-        public List<(TypeReference type, LLVMValueRef ptr)> _selfLocals;
-        public (TypeReference type, LLVMValueRef ptr)[] Locals => parent != null
-            ? [.. parent.Locals, .. _selfLocals]
-            : [.. _selfLocals];
     }
 }
