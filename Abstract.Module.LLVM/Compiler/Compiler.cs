@@ -464,12 +464,29 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         switch (a)
         {
             case InstAdd: return _llvmBuilder.BuildAdd(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
-            
+            case InstSub: return _llvmBuilder.BuildSub(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             case InstMul: return _llvmBuilder.BuildMul(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
 
             case InstAnd: return _llvmBuilder.BuildAnd(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             case InstOr: return _llvmBuilder.BuildOr(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             case InstXor: return _llvmBuilder.BuildXor(CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            
+            case InstCmpEq: return _llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntEQ,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstCmpNeq: return _llvmBuilder.BuildICmp(LLVMIntPredicate.LLVMIntNE,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstCmpGr: return _llvmBuilder.BuildICmp(((IntegerTypeReference)ty).Signed
+                ? LLVMIntPredicate.LLVMIntSGT : LLVMIntPredicate.LLVMIntUGT,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstCmpGe: return _llvmBuilder.BuildICmp(((IntegerTypeReference)ty).Signed
+                ? LLVMIntPredicate.LLVMIntSGE : LLVMIntPredicate.LLVMIntUGE,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstCmpLr: return _llvmBuilder.BuildICmp(((IntegerTypeReference)ty).Signed
+                ? LLVMIntPredicate.LLVMIntSLT : LLVMIntPredicate.LLVMIntULT,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
+            case InstCmpLe: return _llvmBuilder.BuildICmp(((IntegerTypeReference)ty).Signed
+                ? LLVMIntPredicate.LLVMIntSLE : LLVMIntPredicate.LLVMIntULE,
+                    CompileCodeBlockValue(ctx), CompileCodeBlockValue(ctx));
             
             case InstConv: return _llvmBuilder.BuildIntCast(CompileCodeBlockValue(ctx), ConvType(ty));
             case InstExtend: return (((IntegerTypeReference)ty).Signed)
