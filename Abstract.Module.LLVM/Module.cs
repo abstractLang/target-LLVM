@@ -28,6 +28,8 @@ public class Module : IModule
                     
                     MemoryUnit = 8,
                     NativeIntegerSize = 32,
+                    
+                    AllowedInstructions = OmegaInstructions.None,
                 },
                 CompilerInvoke = TargetWasm.LlvmCompileWasm
             },

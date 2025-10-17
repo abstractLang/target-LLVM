@@ -11,7 +11,7 @@ async function _start()
     const memory = new WebAssembly.Memory({initial: 1});
     const memoryView = new DataView(memory.buffer);
     const table = new WebAssembly.Table({ initial: 16, element: 'anyfunc' });
-    var stackPointer = 0x0FFFF;
+    let stackPointer = 0x0FFFF;
 
     const wasmcode = fetch(webassemblyMainPath);
     const rootlibs = {
@@ -19,7 +19,10 @@ async function _start()
             "__linear_memory": memory,
             "__stack_pointer": new WebAssembly.Global({ value: "i32", mutable: true }, stackPointer),
             "__indirect_function_table": table,
-            "__multi3": i128_multiply
+            "__multi3": i128_multiply,
+            
+            "mem_grow": (d) => memory.grow(d),
+            "mem_size": () => memory.buffer.byteLength / 65536,
         },
         Std: Std
     };
@@ -36,12 +39,6 @@ async function _start()
         append_stdout("control", "Program finished\n");
     }
     catch (error) {
-
-        console.log("Memory[44]:", memoryView.getUint32(44, true));
-        console.log("Memory[48]:", memoryView.getUint32(48, true));
-        console.log("Memory[52]:", memoryView.getUint32(52, true));
-        console.log("Memory[116]:", memoryView.getUint32(116, true));
-        
         append_stdout("error", "An unexpected error occurred: " + error + "\n");
     }
 }

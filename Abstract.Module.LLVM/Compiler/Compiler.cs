@@ -17,6 +17,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     private TargetsList _target = target;
     
     private Dictionary<BaseFunctionBuilder, (LLVMTypeRef ftype, LLVMValueRef fobj)> _functions = [];
+    private Dictionary<StaticFieldBuilder, (LLVMTypeRef ftype, LLVMValueRef fobj)> _staticFields = [];
     private Dictionary<StructureBuilder, (LLVMTypeRef type, LLVMValueRef typetbl)> _structures = [];
     private Dictionary<StructureBuilder, VirtualFunctionBuilder?[]> _vtables = [];
     private Dictionary<string, LLVMValueRef> _intrinsincs = [];
@@ -80,13 +81,21 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
     {
         // Abstract should have unnested all namespaces!
         foreach (var i in baseModule.Structures) UnwrapStructureHeader(i);
+        foreach (var i in baseModule.Fields) UnwrapStaticFieldHeader(i);
         foreach (var i in baseModule.Functions) UnwrapFunctionHeader(i);
         
         foreach (var i in baseModule.Structures
                      .SelectMany(e => e.Functions)) UnwrapFunctionHeader(i);
     }
 
-    
+    private void UnwrapStaticFieldHeader(StaticFieldBuilder field)
+    {
+        var t = ConvType(field.Type);
+        var gb = _llvmModule.AddGlobal(t, field.Symbol);
+        gb.Linkage = LLVMLinkage.LLVMInternalLinkage;
+        
+        _staticFields.Add(field, (t, gb));
+    }
     private void UnwrapStructureHeader(StructureBuilder struc)
     {
         var st = ctx.CreateNamedStruct(struc.Symbol);
@@ -101,6 +110,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         ], false);
         var tt = _llvmModule.AddGlobal(ttt, struc.Symbol + ".vtable");
         _structures.Add(struc, (st, tt));
+        unsafe {LLVMSharp.Interop.LLVM.SetGlobalConstant(tt, 1);}
 
         if (struc.VTableSize.HasValue)
         {
@@ -176,11 +186,11 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             foreach (var (i, (_, type)) in baseFunc.Parameters.Index())
             {
                 var paramValue = llvmFunction.GetParam((uint)i);
-                if (type is NodeTypeReference { TypeReference: StructureBuilder })
+                if (type is NodeTypeReference { TypeReference: StructureBuilder @struc })
                 {
                     var local = _llvmBuilder.BuildAlloca(paramValue.TypeOf);
                     var store = _llvmBuilder.BuildStore(paramValue, local);
-                    var align = Math.Max(1, (type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+                    var align = AlignOf(struc);
                     local.SetAlignment(align);
                     store.SetAlignment(align);
                 
@@ -236,7 +246,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         {
             if (selfvtable[i] != null)
             {
-                if (selfvtable[i].CodeBlocks.Count == 0) selfvtable[i] = null;
+                if (selfvtable[i]!.CodeBlocks.Count == 0) selfvtable[i] = null;
                 continue;
             }
             StructureBuilder? curr = baseStruct;
@@ -245,8 +255,8 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 var tab = _vtables[curr];
                 if (tab[i] != null)
                 {
-                    if (tab[i].CodeBlocks.Count == 0) selfvtable[i] = null;
-                    else if (_functions.ContainsKey(tab[i])) selfvtable[i] = tab[i];
+                    if (tab[i]!.CodeBlocks.Count == 0) selfvtable[i] = null;
+                    else if (_functions.ContainsKey(tab[i]!)) selfvtable[i] = tab[i];
                     break;
                 }
                 curr = curr.Extends;
@@ -263,7 +273,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             parentTablePointer,
             LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Length!.Value),
             LLVMValueRef.CreateConstInt(GetNativeInt(), baseStruct.Alignment!.Value),
-            StoreStaticBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier)),
+            StoreStaticBufferUtf8(string.Join('.', baseStruct.GlobalIdentifier), true),
             LLVMValueRef.CreateConstInt(GetNativeInt(), (ulong)selfvtable.Length),
             LLVMValueRef.CreateConstArray(LlvmOpaquePtr, [..values]),
         ], false);
@@ -278,8 +288,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             case MacroDefineLocal @deflocal:
             {
                 var alloca = _llvmBuilder.BuildAlloca(ConvType(deflocal.Type));
-                var align = Math.Max(1, (deflocal.Type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-                alloca.SetAlignment(align);
+                alloca.SetAlignment(AlignOf(deflocal.Type));
                 
                 ctx.Body.Dequeue();
                 ctx.Locals.Add((deflocal.Type, alloca));
@@ -291,8 +300,16 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 var val = CompileCodeBlockValueNullable(ctx);
                 if (!val.HasValue) return;
                 var store = _llvmBuilder.BuildStore(val.Value, ctx.Locals[stlocal.index].ptr);
-                var align = Math.Max(1, (ctx.Locals[stlocal.index].type.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-                store.SetAlignment(align);
+                store.SetAlignment(AlignOf(ctx.Locals[stlocal.index].type));
+            } break;
+            
+            case InstStStaticField @stfield:
+            {
+                ctx.Body.Dequeue();
+                var val = CompileCodeBlockValueNullable(ctx);
+                if (!val.HasValue) return;
+                var store = _llvmBuilder.BuildStore(val.Value,BuilderToValueRef(stfield.StaticField).fld);
+                store.SetAlignment(AlignOf(stfield.StaticField.Type));
             } break;
 
             case InstBranch @branch:
@@ -352,7 +369,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
             }
 
             case InstLdSlice @slice:
-                return StoreStaticByteBuffer(slice.Content);
+                return StoreStaticByteBuffer(slice.Content, true);
             
             case InstLdLocal @ldlocal:
                 if (ldlocal.Local < 0) val = ctx.Args[(-ldlocal.Local) - 1];
@@ -368,6 +385,12 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                     : ctx.Locals[ldlocalref.Local].ptr;
                 break;
 
+            case InstLdStaticField @ldfld:
+            {
+                var r = BuilderToValueRef(ldfld.StaticField);
+                val = r.fld;
+                holding = ldfld.StaticField.Type;
+            } break;
 
             case InstLdNewObject @newobj:
             {
@@ -426,6 +449,11 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 val = _llvmBuilder.BuildCall2(funck.ftype, funck.fun, argsList.ToArray());
             } break;
             
+            
+            case InstLdField:
+            case InstStField: 
+                throw new Exception();
+            
             default: throw new UnreachableException();
         }
         
@@ -443,8 +471,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
                 ctx.Body.Dequeue();
                 var tostore = CompileCodeBlockValue(ctx);
                 val = _llvmBuilder.BuildStore(tostore, ptr);
-                var align = Math.Max(1, (holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-                val.SetAlignment(align);
+                val.SetAlignment(AlignOf(holding));
                 holding = null;
                 break;
             }
@@ -453,8 +480,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
 
         if (holding == null) return val;
         val = _llvmBuilder.BuildLoad2(ConvType(holding), val);
-        var align2 = Math.Max(1, (holding.Alignment ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
-        val.SetAlignment(align2);
+        val.SetAlignment(AlignOf(holding));
         return val;
     }
 
@@ -567,22 +593,42 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         };
         
     }
-    
+
+    private uint BitsToMemUnit(uint? size) => Math.Max(1, (size ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+
+    private uint AlignOf(StructureBuilder struc) => BitsToMemUnit(@struc.Alignment);
+    private uint AlignOf(TypeReference? type)
+    {
+        if (type == null) return 0;
+        return type switch
+        {
+            NodeTypeReference { TypeReference: StructureBuilder @struct } => BitsToMemUnit(@struct.Alignment),
+            //NodeTypeReference { TypeReference: TypeDefinitionBuilder @typedef } => 
+            
+            IntegerTypeReference @intt => BitsToMemUnit(@intt.Bits),
+            ReferenceTypeReference or SliceTypeReference => _configuration.NativeIntegerSize,
+            AnytypeTypeReference => throw new Exception("Anytype should already had ben solved"),
+            
+            _ => throw new UnreachableException(),
+        };
+    }
     
     private (LLVMTypeRef ftype, LLVMValueRef fun) BuilderToValueRef(BaseFunctionBuilder builder) => _functions[builder];
+    private (LLVMTypeRef ftype, LLVMValueRef fld) BuilderToValueRef(StaticFieldBuilder builder) => _staticFields[builder];
     private LLVMTypeRef BuilderToTypeRef(StructureBuilder builder) => _structures[builder].type;
 
     
-    private LLVMValueRef StoreStaticBufferUtf8(string data) => StoreStaticByteBuffer(Encoding.UTF8.GetBytes(data));
-    private unsafe LLVMValueRef StoreStaticByteBuffer(byte[] data)
+    private LLVMValueRef StoreStaticBufferUtf8(string data, bool isConstant)
+        => StoreStaticByteBuffer(Encoding.UTF8.GetBytes(data), isConstant);
+    private unsafe LLVMValueRef StoreStaticByteBuffer(byte[] data, bool isConstant)
     {
         var alloc = stackalloc ulong[data.Length];
         for (var i = 0; i < data.Length; i++) alloc[i] = data[i];
         var span = new ReadOnlySpan<ulong>(alloc, data.Length);
         
-        return StoreStaticBuffer(LlvmInt8, span);
+        return StoreStaticBuffer(LlvmInt8, span, isConstant);
     }
-    private LLVMValueRef StoreStaticBuffer(LLVMTypeRef elmtype, ReadOnlySpan<ulong> data) 
+    private LLVMValueRef StoreStaticBuffer(LLVMTypeRef elmtype, ReadOnlySpan<ulong> data, bool isConstant) 
     {
         var h = 0; foreach (var i in data) h = HashCode.Combine(h, i);
         
@@ -592,6 +638,7 @@ internal partial class LlvmCompiler(LLVMContextRef ctx, TargetsList target)
         var sliceType = CreateSlice(elmtype);
                 
         var global = _llvmModule.AddGlobal(arrayType, $"ro.static.buffer.{_staticBufferMap.Count:0000}");
+        unsafe {LLVMSharp.Interop.LLVM.SetGlobalConstant(global, isConstant ? 1 : 0);}
         var datallvm = new LLVMValueRef[data.Length];
         for (var i = 0; i < data.Length; i++) datallvm[i] = LLVMValueRef.CreateConstInt(elmtype, data[i]);
 
