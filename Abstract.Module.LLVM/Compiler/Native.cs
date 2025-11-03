@@ -14,7 +14,7 @@ internal unsafe partial class LlvmCompiler
     private LLVMTypeRef LlvmPtr(LLVMTypeRef basety) => Llvm.PointerType(basety, 0);
     private LLVMTypeRef LlvmOpaquePtr => Llvm.PointerTypeInContext(ctx, 0);
     private LLVMTypeRef LlvmInt(uint bitsize) => Llvm.IntTypeInContext(ctx, bitsize);
-    private LLVMTypeRef LlvmArray(LLVMTypeRef ety, uint count) => Llvm.ArrayType(ety, count);
+    private LLVMTypeRef LlvmArray(LLVMTypeRef ety, uint count) => Llvm.ArrayType2(ety, count);
 
     private LLVMTypeRef LlvmFunctionType(LLVMTypeRef ReturnType, LLVMTypeRef[] ParamTypes)
     {
@@ -24,9 +24,15 @@ internal unsafe partial class LlvmCompiler
         }
     }
 
+    private LLVMTypeRef LlvmStructType(LLVMTypeRef[] fieldTypes, bool packed)
+    {
+        return ctx.GetStructType(fieldTypes, packed);
+    }
     private LLVMBasicBlockRef LLVMAppendBasicBlock(LLVMValueRef function, string name)
     {
         return Llvm.AppendBasicBlockInContext(ctx, function, new MarshaledString(name));
     }
 
+    private void LlvmSetGlobalConst(LLVMValueRef g, bool isconst) => Llvm.SetGlobalConstant(g, isconst ? 0 : 1);
+    
 }

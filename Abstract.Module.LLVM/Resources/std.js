@@ -32,4 +32,7 @@ export const Std = {
     
     "Console.writeln(BigInt)": console_writeln_signedInt, "Console.writeln(UBigInt)": console_writeln_unsignedInt,
     "Console.writeln(string(Utf8))": console_writeln_string$Utf8,
+    
+    
+    "Process.exit(iptr)": (status) => { throw { error: "exited", statusCode: status } },
 }
