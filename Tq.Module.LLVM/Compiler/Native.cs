@@ -1,6 +1,6 @@
 using LLVMSharp.Interop;
 using Llvm = LLVMSharp.Interop.LLVM;
-namespace Abstract.Module.LLVM.Compiler;
+namespace Tq.Module.LLVM.Compiler;
 
 internal unsafe partial class LlvmCompiler
 {

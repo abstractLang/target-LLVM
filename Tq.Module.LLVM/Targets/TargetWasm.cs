@@ -1,10 +1,10 @@
 using System.Reflection;
-using Abstract.Module.LLVM.Compiler;
-using Abstract.Realizer.Builder;
-using Abstract.Realizer.Core.Configuration.LangOutput;
 using LLVMSharp.Interop;
+using Tq.Module.LLVM.Compiler;
+using Tq.Realizer.Builder;
+using Tq.Realizer.Core.Configuration.LangOutput;
 
-namespace Abstract.Module.LLVM.Targets;
+namespace Tq.Module.LLVM.Targets;
 
 public static class TargetWasm
 {
@@ -40,8 +40,7 @@ public static class TargetWasm
             LLVMRelocMode.LLVMRelocDefault,
             LLVMCodeModel.LLVMCodeModelDefault);
         
-        var exePath = Assembly.GetExecutingAssembly().Location;
-        var exeDir = Path.GetDirectoryName(exePath) ?? "";
+        var exeDir = AppContext.BaseDirectory;
         
         Console.WriteLine("LLVM: Emitting artifacts...");
         

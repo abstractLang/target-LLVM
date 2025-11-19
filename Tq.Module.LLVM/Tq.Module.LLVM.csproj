@@ -5,10 +5,11 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <RootNamespace>Abstract.Module.LLVM</RootNamespace>
     </PropertyGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\..\Abstract.Module.Core\Abstract.Module.Core.csproj" />
+      <ProjectReference Include="..\..\..\tq-realizer\Tq.Realizer\Tq.Realizer.csproj" />
     </ItemGroup>
 
     <ItemGroup>

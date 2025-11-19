@@ -1,11 +1,10 @@
-﻿using Abstract.Module.Core;
-using Abstract.Module.Core.Configuration;
-using Abstract.Module.LLVM.Targets;
-using Abstract.Realizer.Core.Configuration.LangOutput;
+﻿using Tq.Module.LLVM.Targets;
+using Tq.Realizer.Core.Configuration;
+using Tq.Realizer.Core.Configuration.LangOutput;
 
-namespace Abstract.Module.LLVM;
+namespace Tq.Module.LLVM;
 
-public class Module : IModule
+public class Module: IModule
 {
     public ModuleConfiguration Config { get; } = new()
     {
@@ -29,8 +28,10 @@ public class Module : IModule
                     MemoryUnit = 8,
                     NativeIntegerSize = 32,
                     
-                    AllowedInstructions = OmegaInstructions.None,
+                    GenericAllowedFeatures = GenericAllowedFeatures.None, 
+                    OmegaAllowedFeatures = OmegaAllowedFeatures.None,
                 },
+                
                 CompilerInvoke = TargetWasm.LlvmCompileWasm
             },
         ]
