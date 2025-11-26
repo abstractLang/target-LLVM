@@ -15,7 +15,7 @@ public class Module: IModule
         Version = "1.0.0",
         
         Targets = [
-            new ModuleLanguageTargetConfiguration
+            new TargetConfiguration
             {
                 TargetName = "LLVM-WASM",
                 TargetDescription = "Compiles to webassembly using LLVM",
@@ -23,7 +23,7 @@ public class Module: IModule
                 
                 LanguageOutput = new OmegaOutputConfiguration() {
                     BakeGenerics = true,
-                    UnnestMembers = true,
+                    UnnestMembers = UnnestMembersFlags.All,
                     
                     MemoryUnit = 8,
                     NativeIntegerSize = 32,

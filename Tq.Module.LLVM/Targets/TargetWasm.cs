@@ -1,14 +1,15 @@
 using System.Reflection;
 using LLVMSharp.Interop;
 using Tq.Module.LLVM.Compiler;
-using Tq.Realizer.Builder;
+using Tq.Realizeer.Core.Program;
+using Tq.Realizer.Core.Builder;
 using Tq.Realizer.Core.Configuration.LangOutput;
 
 namespace Tq.Module.LLVM.Targets;
 
 public static class TargetWasm
 {
-    internal static void LlvmCompileWasm(ProgramBuilder program, ILanguageOutputConfiguration config)
+    internal static void LlvmCompileWasm(RealizerProgram program, IOutputConfiguration config)
     {
         
         Console.WriteLine("Compiling to WASM with LLVM...");
