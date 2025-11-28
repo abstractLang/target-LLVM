@@ -35,6 +35,7 @@ internal partial class LlvmCompiler
 
     public LlvmCompiler(LLVMContextRef ctx, TargetsList llvm)
     {
+        this.ctx = ctx;
         _target = llvm;
         _intrinsincs.Clear();
         InitializeIntrinsics();
@@ -51,7 +52,7 @@ internal partial class LlvmCompiler
 
         
         foreach (var m in program.Modules) DeclareModuleMembers(m);
-        
+
         // Order matters here
         CompileFunctions();
         CompileStructs();
@@ -113,7 +114,7 @@ internal partial class LlvmCompiler
         
     }
 
-    private void DeclareModuleMembers(RealizerNamespace baseModule)
+    private void DeclareModuleMembers(RealizerModule baseModule)
     {
         // Abstract should have unnested all namespaces!
         foreach (var i in baseModule.GetMembers())
@@ -169,11 +170,13 @@ internal partial class LlvmCompiler
         
         var fun = _llvmModule.AddFunction(baseFunc.Name, functype);
 
-        // To export:
-            //fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
-            //fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
-            //fun.AddTargetDependentFunctionAttr("wasm-export-name", func.ExportSymbol);
-            
+        if (baseFunc.ExportSymbol != null)
+        {
+            fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
+            fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLExportStorageClass;
+            fun.AddTargetDependentFunctionAttr("wasm-export-name", baseFunc.ExportSymbol);
+        }
+
         // To import:
             //fun.Linkage = LLVMLinkage.LLVMExternalLinkage;
             //fun.DLLStorageClass = LLVMDLLStorageClass.LLVMDLLImportStorageClass;
