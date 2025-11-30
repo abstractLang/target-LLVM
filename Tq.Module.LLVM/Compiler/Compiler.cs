@@ -5,11 +5,13 @@ using LLVMSharp.Interop;
 using Tq.Module.LLVM.Targets;
 using Tq.Realizeer.Core.Program;
 using Tq.Realizeer.Core.Program.Builder;
+using Tq.Realizeer.Core.Program.Member;
 using Tq.Realizer.Core.Builder.Execution.Omega;
 using Tq.Realizer.Core.Builder.Language.Omega;
 using Tq.Realizer.Core.Builder.References;
 using Tq.Realizer.Core.Configuration.LangOutput;
 using Tq.Realizer.Core.Intermediate.Values;
+using static Tq.Realizer.Core.Builder.Language.Omega.OmegaInstructions;
 
 namespace Tq.Module.LLVM.Compiler;
 
@@ -196,20 +198,24 @@ internal partial class LlvmCompiler
     }
     private void CompileFunction(RealizerFunction baseFunc, LLVMValueRef llvmFunction)
     {
-        var args = llvmFunction.GetParams();
+        var baseargs = baseFunc.Parameters;
+        var llvmargs = llvmFunction.GetParams();
+        Dictionary<RealizerParameter, LLVMValueRef> finalargs = [];
+        for (var i = 0; i < llvmargs.Length; i++) finalargs.Add(baseargs[i], llvmargs[i]);
+        finalargs.TrimExcess();
         
-        var codeBlocks = new (OmegaCodeCell baseBlock, LLVMBasicBlockRef llvmBlock)[baseFunc.ExecutionBlocksCount];
+        var codeCells = new (OmegaCodeCell baseCell, LLVMBasicBlockRef llvmBlock)[baseFunc.ExecutionBlocksCount];
         foreach (var (i, block) in baseFunc.ExecutionBlocks.Index())
         {
             if (block is not OmegaCodeCell @omega) throw new Exception("Expected OmegaBytecodeBuilder");
             
             var llvmblock = LLVMAppendBasicBlock(llvmFunction, block.Name);
-            codeBlocks[i] = (omega, llvmblock);
+            codeCells[i] = (omega, llvmblock);
         }
 
-        if (codeBlocks.Length > 0)
+        if (codeCells.Length > 0)
         {
-            _llvmBuilder.PositionAtEnd(codeBlocks[0].llvmBlock);
+            _llvmBuilder.PositionAtEnd(codeCells[0].llvmBlock);
             foreach (var (i, p) in baseFunc.Parameters.Index())
             {
                 var paramValue = llvmFunction.GetParam((uint)i);
@@ -224,27 +230,24 @@ internal partial class LlvmCompiler
                     paramValue = local;
                 }
 
-                args[i] = paramValue;
+                finalargs[p] = paramValue;
             }
         }
 
-        List<(TypeReference type, LLVMValueRef ptr)> locals = [];
-
         var count = 0;
-        foreach (var (baseblock, llvmblock) in codeBlocks)
+        foreach (var (cell, llvmblock) in codeCells)
         {
-            // var body = new Queue<IOmegaInstruction>(baseblock.InstructionsList);
-            // var ctx = new CompileCodeBlockCtx {
-            //    RealizerFunction = baseFunc,
-            //    LlvmFunction = llvmFunction,
-            //    BlockMap = codeBlocks,
-            //    Args = args,
-            //    Locals = locals,
-            //    Body = body,
-            // };
-            //
-            // _llvmBuilder.PositionAtEnd(llvmblock);
-            // while (body.Count > 0) CompileCodeBlockInstruction(ctx);
+            var body = new Queue<OmegaInstructions.IOmegaInstruction>(cell.Instructions);
+            var ctx = new CompileCodeBlockCtx {
+               RealizerFunction = baseFunc,
+               LlvmFunction = llvmFunction,
+               BlockMap = codeCells,
+               Args = finalargs,
+               Locals = [],
+            };
+            
+            _llvmBuilder.PositionAtEnd(llvmblock);
+            foreach (var i in body) CompileCodeBlockInstruction(_llvmBuilder, i);
         }
     }
 
@@ -287,13 +290,100 @@ internal partial class LlvmCompiler
     }
 
     
-    private void CompileCodeBlockInstruction(CompileCodeBlockCtx ctx)
+    
+    private void CompileCodeBlockInstruction(LLVMBuilderRef builder, IOmegaInstruction instruction)
     {
-        Console.WriteLine("Not implemented!");
+        switch (instruction)
+        {
+            case Assignment @assignment:
+            {
+                switch (assignment.Left)
+                {
+                    case Member @member:
+                    {
+                        var ptr = CompileExecCellValue_member(builder, member, ValueLoadingMode.Store);
+                        var val = CompileExecCellValue(builder, assignment.Right, ValueLoadingMode.Load);
+                        builder.BuildStore(val, ptr);
+                    } break;
+
+                    case Access @access:
+                    {
+                        // TODO
+                    } break;
+                        
+                    default: throw new UnreachableException();
+                };
+            } break;
+
+            case Ret @ret:
+            {
+                if (ret.Value == null) builder.BuildRetVoid();
+                else builder.BuildRet(CompileExecCellValue(builder, ret.Value, ValueLoadingMode.Load));
+            } break;
+            
+            default: throw new UnreachableException();
+        }
+    }
+    private LLVMValueRef CompileExecCellValue(LLVMBuilderRef builder, IOmegaValue instValue, ValueLoadingMode loadingMode)
+    {
+        switch (instValue)
+        {
+            case Add @add:
+                return builder.BuildAdd(
+                    CompileExecCellValue(builder, add.Left, ValueLoadingMode.Load),
+                    CompileExecCellValue(builder, add.Right, ValueLoadingMode.Load));
+            
+            //case Sub @sub:
+            //    return builder.BuildSub(
+            //        CompileExecCellValue(builder, sub.Left, ValueLoadingMode.Load),
+            //        CompileExecCellValue(builder, sub.Right, ValueLoadingMode.Load));
+            
+            case Mul @mul:
+                return builder.BuildMul(
+                    CompileExecCellValue(builder, mul.Left, ValueLoadingMode.Load),
+                    CompileExecCellValue(builder, mul.Right, ValueLoadingMode.Load));
+
+            case Constant @const:
+                return @const.Value switch
+                {
+                    IntegerConstantValue @icv => LLVMValueRef.CreateConstInt(GetIntType(icv.BitSize), unchecked((ulong)(Int128)icv.Value)),
+                    _ => throw new UnreachableException(),
+                };
+            
+            case Member @m: return CompileExecCellValue_member(builder, m, loadingMode);
+            
+            default: throw new UnreachableException();
+        }
+    }
+
+    private LLVMValueRef CompileExecCellValue_member(LLVMBuilderRef builder, Member member, ValueLoadingMode loadingMode)
+    {
+        switch (member.Node)
+        {
+            case RealizerField { Static: true } field:
+                return _staticFields[field].fobj;
+            
+            //case RealizerField { Static: false } field:
+            
+            default: throw new UnreachableException();
+        }
     }
 
 
 
+    private LLVMTypeRef GetIntType(ushort bitsize)
+    {
+        return bitsize switch
+        {
+            0 => GetNativeInt(),
+            1 => LlvmBool,
+            8 => LlvmInt8,
+            16 => LlvmInt16,
+            32 => LlvmInt32,
+            64 => LlvmInt64,
+            _ => LlvmInt(bitsize),
+        };
+    }
     private LLVMTypeRef ConvType(TypeReference? typeref)
     {
         if (typeref == null) return LlvmVoid;
@@ -301,12 +391,13 @@ internal partial class LlvmCompiler
         {
             IntegerTypeReference @intt => intt.Bits! switch
             {
+                0 => GetNativeInt(),
                 1 => LlvmBool,
                 8 => LlvmInt8,
                 16 => LlvmInt16,
                 32 => LlvmInt32,
                 64 => LlvmInt64,
-                _ => LlvmInt(intt.Bits ?? _configuration.NativeIntegerSize),
+                _ => LlvmInt(intt.Bits),
             },
             
             NoreturnTypeReference or
@@ -451,14 +542,13 @@ internal partial class LlvmCompiler
         
     private ulong[] BigIntegerToULongs(BigInteger value, int numBits)
     {
-        if (value.Sign < 0)
-            throw new ArgumentException("somente positivos suportados");
+        if (value.Sign < 0) throw new ArgumentException();
 
         int numWords = (numBits + 63) / 64;
         ulong[] words = new ulong[numWords];
 
         BigInteger remaining = value;
-        for (int i = 0; i < numWords; i++)
+        for (var i = 0; i < numWords; i++)
         {
             words[i] = (ulong)(remaining & 0xFFFFFFFFFFFFFFFF);
             remaining >>= 64;
@@ -472,11 +562,18 @@ internal partial class LlvmCompiler
     {
         public RealizerFunction RealizerFunction;
         public LLVMValueRef LlvmFunction;
+        
         public (OmegaCodeCell baseb, LLVMBasicBlockRef llvmb)[] BlockMap;
         
-        public LLVMValueRef[] Args;
-        public List<(TypeReference type, LLVMValueRef ptr)> Locals;
-        public Queue<OmegaInstructions.IOmegaInstruction> Body;
+        public Dictionary<RealizerParameter, LLVMValueRef> Args;
+        public Dictionary<int, LLVMValueRef> Locals;
         
+    }
+
+    private enum ValueLoadingMode
+    {
+        Load,
+        Store,
+        Call
     }
 }
