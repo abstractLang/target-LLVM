@@ -19,7 +19,7 @@ internal partial class LlvmCompiler
 {
     private IOutputConfiguration _configuration;
     private TargetsList _target;
-    private LLVMContextRef ctx;
+    private LLVMContextRef _llvmCtx;
     
     private Dictionary<RealizerFunction, (LLVMTypeRef ftype, LLVMValueRef fobj)> _functions = [];
     private Dictionary<dynamic, (LLVMTypeRef ftype, LLVMValueRef fobj)> _staticFields = [];
@@ -35,9 +35,9 @@ internal partial class LlvmCompiler
     private Dictionary<int, LLVMValueRef> _staticMap = [];
 
 
-    public LlvmCompiler(LLVMContextRef ctx, TargetsList llvm)
+    public LlvmCompiler(LLVMContextRef llvmCtx, TargetsList llvm)
     {
-        this.ctx = ctx;
+        this._llvmCtx = llvmCtx;
         _target = llvm;
         _intrinsincs.Clear();
         InitializeIntrinsics();
@@ -49,8 +49,8 @@ internal partial class LlvmCompiler
         _structures.Clear();
         _configuration = config;
         
-        _llvmModule = ctx.CreateModuleWithName(program.Name);
-        _llvmBuilder = ctx.CreateBuilder();
+        _llvmModule = _llvmCtx.CreateModuleWithName(program.Name);
+        _llvmBuilder = _llvmCtx.CreateBuilder();
 
         
         foreach (var m in program.Modules) DeclareModuleMembers(m);
@@ -142,9 +142,9 @@ internal partial class LlvmCompiler
     }
     private void UnwrapStructureHeader(RealizerStructure struc)
     {
-        var st = ctx.CreateNamedStruct(struc.Name);
+        var st = _llvmCtx.CreateNamedStruct(struc.Name);
         
-        var vtableType = ctx.GetStructType([
+        var vtableType = _llvmCtx.GetStructType([
             LlvmOpaquePtr, // Parent table
             GetNativeInt(), // Type size
             GetNativeInt(), // Type alignment
@@ -190,11 +190,11 @@ internal partial class LlvmCompiler
         
     }
 
-    
+
     private void CompileFunctions()
     {
         foreach (var (baseFunction, (llvmFuncType, llvmFunction)) in _functions)
-            if (baseFunction is RealizerFunction { ExecutionBlocksCount: > 0 } @fb) CompileFunction(fb, llvmFunction);
+            if (baseFunction is { ExecutionBlocksCount: > 0 } @fb) CompileFunction(fb, llvmFunction);
     }
     private void CompileFunction(RealizerFunction baseFunc, LLVMValueRef llvmFunction)
     {
@@ -237,17 +237,19 @@ internal partial class LlvmCompiler
         var count = 0;
         foreach (var (cell, llvmblock) in codeCells)
         {
-            var body = new Queue<OmegaInstructions.IOmegaInstruction>(cell.Instructions);
+            var body = new Queue<IOmegaInstruction>(cell.Instructions);
             var ctx = new CompileCodeBlockCtx {
                RealizerFunction = baseFunc,
                LlvmFunction = llvmFunction,
                BlockMap = codeCells,
                Args = finalargs,
                Locals = [],
+               expectingTypeStack = []
             };
             
             _llvmBuilder.PositionAtEnd(llvmblock);
-            foreach (var i in body) CompileCodeBlockInstruction(_llvmBuilder, i);
+            foreach (var i in body)
+                CompileCodeBlockInstruction(_llvmBuilder, i, ctx);
         }
     }
 
@@ -291,7 +293,7 @@ internal partial class LlvmCompiler
 
     
     
-    private void CompileCodeBlockInstruction(LLVMBuilderRef builder, IOmegaInstruction instruction)
+    private void CompileCodeBlockInstruction(LLVMBuilderRef builder, IOmegaInstruction instruction, CompileCodeBlockCtx ctx)
     {
         switch (instruction)
         {
@@ -301,14 +303,28 @@ internal partial class LlvmCompiler
                 {
                     case Member @member:
                     {
-                        var ptr = CompileExecCellValue_member(builder, member, ValueLoadingMode.Store);
-                        var val = CompileExecCellValue(builder, assignment.Right, ValueLoadingMode.Load);
+                        var ptr = CompileExecCellValue_member(builder, member, ctx, AccessMode.Write);
+                        var val = CompileExecCellValue(builder, assignment.Right, ctx);
                         builder.BuildStore(val, ptr);
                     } break;
 
                     case Access @access:
                     {
-                        // TODO
+                        var baseptr = CompileExecCellValue(builder, access.Left, ctx);
+                        switch (access.Right)
+                        {
+                            case Member { Node: RealizerField, Node.Static: false, Node.Parent: RealizerStructure } @m:
+                            {
+                                var field = (RealizerField)m.Node;
+                                var structype = ConvType(new NodeTypeReference((RealizerStructure)field.Parent!));
+                                baseptr = builder.BuildStructGEP2(structype, baseptr, field.Index);
+                            } break;
+
+                            default: throw new UnreachableException();
+                        }
+
+                        var val = CompileExecCellValue(builder, assignment.Right, ctx);
+                        builder.BuildStore(val, baseptr);
                     } break;
                         
                     default: throw new UnreachableException();
@@ -318,55 +334,130 @@ internal partial class LlvmCompiler
             case Ret @ret:
             {
                 if (ret.Value == null) builder.BuildRetVoid();
-                else builder.BuildRet(CompileExecCellValue(builder, ret.Value, ValueLoadingMode.Load));
+                else builder.BuildRet(CompileExecCellValue(builder, ret.Value, ctx));
             } break;
+
+            case Throw @throw: builder.BuildUnreachable(); break;
+            
+            case IOmegaExpression @v: CompileExecCellValue(builder, v, ctx); break;
             
             default: throw new UnreachableException();
         }
     }
-    private LLVMValueRef CompileExecCellValue(LLVMBuilderRef builder, IOmegaValue instValue, ValueLoadingMode loadingMode)
+    private LLVMValueRef CompileExecCellValue(LLVMBuilderRef builder, IOmegaExpression instExpression, CompileCodeBlockCtx ctx,
+        AccessMode access = AccessMode.Read)
     {
-        switch (instValue)
+        switch (instExpression)
         {
             case Add @add:
-                return builder.BuildAdd(
-                    CompileExecCellValue(builder, add.Left, ValueLoadingMode.Load),
-                    CompileExecCellValue(builder, add.Right, ValueLoadingMode.Load));
+                return builder.BuildAdd(CompileExecCellValue(builder, add.Left, ctx),
+                    CompileExecCellValue(builder, add.Right, ctx));
             
-            //case Sub @sub:
-            //    return builder.BuildSub(
-            //        CompileExecCellValue(builder, sub.Left, ValueLoadingMode.Load),
-            //        CompileExecCellValue(builder, sub.Right, ValueLoadingMode.Load));
+            // Sub @sub => return builder.BuildSub(
+            //        CompileExecCellValue(builder, sub.Left, ctx),
+            //        CompileExecCellValue(builder, sub.Right, ctx));
             
             case Mul @mul:
-                return builder.BuildMul(
-                    CompileExecCellValue(builder, mul.Left, ValueLoadingMode.Load),
-                    CompileExecCellValue(builder, mul.Right, ValueLoadingMode.Load));
+                return builder.BuildMul(CompileExecCellValue(builder, mul.Left, ctx),
+                    CompileExecCellValue(builder, mul.Right, ctx));
 
+            case Access @acc:
+            {
+                var baseptr = CompileExecCellValue(builder, acc.Left, ctx);
+                switch (acc.Right)
+                {
+                    case Member { Node: RealizerField @f, Node.Static: false }:
+                    {
+                        var fieldptr = builder.BuildStructGEP2(
+                            _structures[(RealizerStructure)f.Parent!].type,
+                            baseptr, f.Index+1);
+                        
+                        return access == AccessMode.Read
+                            ? builder.BuildLoad2(ConvType(f.Type), fieldptr)
+                            : fieldptr;
+                    }
+
+                    case Member { Node: RealizerProperty @p, Node.Static: false }:
+                        switch (access)
+                        {
+                            case AccessMode.Read:
+                            {
+                                var (ft, fn) = _functions[p.Getter!];
+                                return builder.BuildCall2(ft, fn, [baseptr]);
+                            }
+                            case AccessMode.Write: throw new NotImplementedException();
+                            default: throw new ArgumentOutOfRangeException();
+                        }
+
+                    case Call { Callable: RealizerFunction @f } @c:
+                    {
+                        var (ft, fn) = _functions[f];
+                        var args = new LLVMValueRef[f.Parameters.Length];
+                        args[0] = baseptr;
+                        
+                        for (int i = 0; i < c.Arguments.Length; i++)
+                            args[i+1] = CompileExecCellValue(builder, c.Arguments[i], ctx);
+                        
+                        return builder.BuildCall2(ft, fn, args);
+                    }
+                    
+                    default: throw new UnreachableException();
+                }
+            }
+            
             case Constant @const:
                 return @const.Value switch
                 {
-                    IntegerConstantValue @icv => LLVMValueRef.CreateConstInt(GetIntType(icv.BitSize), unchecked((ulong)(Int128)icv.Value)),
+                    IntegerConstantValue @icv => LLVMValueRef.CreateConstInt(GetIntType(icv.BitSize),
+                        unchecked((ulong)(Int128)icv.Value)),
+
+                    NullConstantValue @ncv => LLVMValueRef.CreateConstIntToPtr(
+                        LLVMValueRef.CreateConstInt(GetNativeInt(), 0), LlvmOpaquePtr),
+
+                    SliceConstantValue @slice => StoreGlobalArray(ConvType(slice.ElementType), slice.Content, true),
+                    
                     _ => throw new UnreachableException(),
                 };
             
-            case Member @m: return CompileExecCellValue_member(builder, m, loadingMode);
+            case Call @call:
+            {
+                var fn = CompileExecCellValue_callable(builder, call.Callable, ctx);
+                var args = call.Arguments.Select(e => CompileExecCellValue(builder, e, ctx)).ToArray();
+                
+                return builder.BuildCall2(fn.ftype, fn.fun, args);
+            }
+            
+            case Member @m: return CompileExecCellValue_member(builder, m, ctx);
+            
+            case Argument @a: return ctx.Args[a.Parameter];
+            
+            case Self: return ctx.Args[ctx.RealizerFunction.Parameters[0]];
             
             default: throw new UnreachableException();
         }
     }
 
-    private LLVMValueRef CompileExecCellValue_member(LLVMBuilderRef builder, Member member, ValueLoadingMode loadingMode)
+    private LLVMValueRef CompileExecCellValue_member(LLVMBuilderRef builder, Member member, CompileCodeBlockCtx ctx,
+        AccessMode access = AccessMode.Read)
     {
-        switch (member.Node)
+        return member.Node switch
         {
-            case RealizerField { Static: true } field:
-                return _staticFields[field].fobj;
+            RealizerField { Static: true } f => access == AccessMode.Read
+                ? builder.BuildLoad2(ConvType(f.Type), _staticFields[f].fobj) : _staticFields[f].fobj,
             
-            //case RealizerField { Static: false } field:
+            _ => throw new UnreachableException()
+        };
+    }
+
+    private (LLVMTypeRef ftype, LLVMValueRef fun) CompileExecCellValue_callable(LLVMBuilderRef builder,
+        IOmegaCallable callable, CompileCodeBlockCtx ctx, AccessMode access = AccessMode.Read)
+    {
+        return callable switch
+        {
+            Member { Node: RealizerFunction @f } => _functions[f],
             
-            default: throw new UnreachableException();
-        }
+            _ => throw new UnreachableException()
+        };
     }
 
 
@@ -460,6 +551,15 @@ internal partial class LlvmCompiler
         return g;
     }
 
+    private unsafe LLVMValueRef StoreGlobalString(string data, LLVMTypeRef elmtype)
+    {
+        var strdata = Encoding.UTF8.GetBytes(data);
+        var array = new RealizerConstantValue[strdata.Length];
+
+        for (var i = 0; i < strdata.Length; i++) array[i] = new IntegerConstantValue(8, strdata[i]);
+
+        return StoreGlobalArray(LlvmInt8, array, true);
+    }
     private LLVMValueRef StoreGlobalArray(LLVMTypeRef elmtype, RealizerConstantValue[] data, bool isConstant) 
     {
         var h = data.Aggregate(0, HashCode.Combine);
@@ -567,13 +667,10 @@ internal partial class LlvmCompiler
         
         public Dictionary<RealizerParameter, LLVMValueRef> Args;
         public Dictionary<int, LLVMValueRef> Locals;
-        
+
+        public Stack<TypeReference> expectingTypeStack;
     }
 
-    private enum ValueLoadingMode
-    {
-        Load,
-        Store,
-        Call
-    }
+    private enum AccessMode { Read, Write }
+    
 }

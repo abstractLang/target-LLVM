@@ -5,15 +5,15 @@ namespace Tq.Module.LLVM.Compiler;
 internal unsafe partial class LlvmCompiler
 {
     
-    private LLVMTypeRef LlvmVoid => ctx.VoidType;
-    private LLVMTypeRef LlvmBool => ctx.Int1Type;
-    private LLVMTypeRef LlvmInt8 => ctx.Int8Type;
-    private LLVMTypeRef LlvmInt16 => ctx.Int16Type;
-    private LLVMTypeRef LlvmInt32 => ctx.Int32Type;
-    private LLVMTypeRef LlvmInt64 => ctx.Int64Type;
+    private LLVMTypeRef LlvmVoid => _llvmCtx.VoidType;
+    private LLVMTypeRef LlvmBool => _llvmCtx.Int1Type;
+    private LLVMTypeRef LlvmInt8 => _llvmCtx.Int8Type;
+    private LLVMTypeRef LlvmInt16 => _llvmCtx.Int16Type;
+    private LLVMTypeRef LlvmInt32 => _llvmCtx.Int32Type;
+    private LLVMTypeRef LlvmInt64 => _llvmCtx.Int64Type;
     private LLVMTypeRef LlvmPtr(LLVMTypeRef basety) => Llvm.PointerType(basety, 0);
-    private LLVMTypeRef LlvmOpaquePtr => Llvm.PointerTypeInContext(ctx, 0);
-    private LLVMTypeRef LlvmInt(uint bitsize) => Llvm.IntTypeInContext(ctx, bitsize);
+    private LLVMTypeRef LlvmOpaquePtr => Llvm.PointerTypeInContext(_llvmCtx, 0);
+    private LLVMTypeRef LlvmInt(uint bitsize) => Llvm.IntTypeInContext(_llvmCtx, bitsize);
     private LLVMTypeRef LlvmArray(LLVMTypeRef ety, uint count) => Llvm.ArrayType2(ety, count);
 
     private LLVMTypeRef LlvmFunctionType(LLVMTypeRef ReturnType, LLVMTypeRef[] ParamTypes)
@@ -26,11 +26,11 @@ internal unsafe partial class LlvmCompiler
 
     private LLVMTypeRef LlvmStructType(LLVMTypeRef[] fieldTypes, bool packed)
     {
-        return ctx.GetStructType(fieldTypes, packed);
+        return _llvmCtx.GetStructType(fieldTypes, packed);
     }
     private LLVMBasicBlockRef LLVMAppendBasicBlock(LLVMValueRef function, string name)
     {
-        return Llvm.AppendBasicBlockInContext(ctx, function, new MarshaledString(name));
+        return Llvm.AppendBasicBlockInContext(_llvmCtx, function, new MarshaledString(name));
     }
 
     private void LlvmSetGlobalConst(LLVMValueRef g, bool isconst) => Llvm.SetGlobalConstant(g, isconst ? 0 : 1);
