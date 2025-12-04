@@ -23,8 +23,8 @@ public class Module: IModule
                 
                 LanguageOutput = new OmegaOutputConfiguration() {
                     BakeGenerics = true,
-                    UnnestMembersOption = UnnestMembersOptions.NoNamespaces
-                                        | UnnestMembersOptions.ForceStaticFunctions,
+                    AbstractingOptions = AbstractingOptions.UnwrapNamespaces
+                                        | AbstractingOptions.NoSelfInstructions,
                     
                     MemoryUnit = 8,
                     NativeIntegerSize = 32,
