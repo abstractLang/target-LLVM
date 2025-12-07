@@ -23,8 +23,9 @@ public class Module: IModule
                 
                 LanguageOutput = new OmegaOutputConfiguration() {
                     BakeGenerics = true,
-                    AbstractingOptions = AbstractingOptions.UnwrapNamespaces
-                                        | AbstractingOptions.NoSelfInstructions,
+                    AbstractingOptions = AbstractingOptions.NoNamespaces
+                                        | AbstractingOptions.NoObjectOrientation
+                    ,
                     
                     MemoryUnit = 8,
                     NativeIntegerSize = 32,

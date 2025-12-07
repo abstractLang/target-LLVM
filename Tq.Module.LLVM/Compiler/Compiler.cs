@@ -7,7 +7,6 @@ using Tq.Realizeer.Core.Program;
 using Tq.Realizeer.Core.Program.Builder;
 using Tq.Realizeer.Core.Program.Member;
 using Tq.Realizer.Core.Builder.Execution.Omega;
-using Tq.Realizer.Core.Builder.Language.Omega;
 using Tq.Realizer.Core.Builder.References;
 using Tq.Realizer.Core.Configuration.LangOutput;
 using Tq.Realizer.Core.Intermediate.Values;
@@ -246,8 +245,7 @@ internal partial class LlvmCompiler
                LlvmFunction = llvmFunction,
                BlockMap = codeCells,
                Args = finalargs,
-               Locals = [],
-               expectingTypeStack = []
+               Registers = [],
             };
             
             _llvmBuilder.PositionAtEnd(llvmblock);
@@ -304,11 +302,8 @@ internal partial class LlvmCompiler
         switch (instruction)
         {
             case Assignment @assignment:
-            {
-                var ptr = CompileExecCellValue(builder, assignment.Left, ctx, AccessMode.Ptr);
-                var val = CompileExecCellValue(builder, assignment.Right, ctx);
-                builder.BuildStore(val, ptr);
-            } break;
+                CompileExecCellValue_assignment(builder, assignment, ctx);
+                break;
 
             case Ret @ret:
             {
@@ -352,19 +347,8 @@ internal partial class LlvmCompiler
                 return CompileExecCellValue(builder, acc.Right, ctx, access, baseptr);
             }
             
-            case Constant @const:
-                return @const.Value switch
-                {
-                    IntegerConstantValue @icv => LLVMValueRef.CreateConstInt(GetIntType(icv.BitSize),
-                        unchecked((ulong)(Int128)icv.Value)),
-
-                    NullConstantValue @ncv => LLVMValueRef.CreateConstIntToPtr(
-                        LLVMValueRef.CreateConstInt(GetNativeInt(), 0), LlvmOpaquePtr),
-
-                    SliceConstantValue @slice => StoreGlobalArray(ConvType(slice.ElementType), slice.Content, true),
-                    
-                    _ => throw new UnreachableException(),
-                };
+            case Constant @const: return CompileExecCellValue_constant(builder, @const, ctx);
+                
             
             case Call @call:
             {
@@ -377,10 +361,22 @@ internal partial class LlvmCompiler
             case Member @m: return CompileExecCellValue_member(builder, m, ctx, access, inPointer);
             
             case Argument @a: return ctx.Args[a.Parameter];
+
+            case Register @r:
+            {
+                var ptr = ctx.Registers[r.Index];
+                return access == AccessMode.Ptr ? ptr : builder.BuildLoad2(ConvType(r.Type), ptr);
+            }
             
-            case Self: return ctx.Args[ctx.RealizerFunction.Parameters[0]];
-            
-            case Alloca @a: return builder.BuildAlloca(ConvType(a.Type));
+            case Alloca @a:
+            {
+                var alloca = builder.BuildAlloca(ConvType(a.Type));
+                // FIXME
+                // technically accessing it as value is UB,
+                // see if it is a desired possible behavior
+                return access == AccessMode.Ptr
+                    ? alloca : builder.BuildLoad2(ConvType(((ReferenceTypeReference)a.Type).Subtype), alloca);
+            }
 
             case Cmp @c:
                 return builder.BuildICmp(c.Op switch
@@ -407,15 +403,47 @@ internal partial class LlvmCompiler
                 return builder.BuildIntCast(CompileExecCellValue(builder, it.Exp, ctx), ConvType(it.Type));
             
             case IntFromPtr @itp:
-                return builder.BuildPtrToInt(CompileExecCellValue(builder, itp.Exp, ctx), ConvType(itp.Type));
+                return builder.BuildPtrToInt(CompileExecCellValue(builder, itp.Expression, ctx), ConvType(itp.Type));
             
             case PtrFromInt @pti:
-                return builder.BuildIntToPtr(CompileExecCellValue(builder, pti.Exp, ctx), ConvType(pti.Type));
+                return builder.BuildIntToPtr(CompileExecCellValue(builder, pti.Expression, ctx), ConvType(pti.Type));
+            
+            case Ref @r:
+                return CompileExecCellValue(builder, r.Expression, ctx, AccessMode.Ptr);
+
+            case Val @v:
+                return CompileExecCellValue(builder, v.Expression, ctx);
+
+            case Typeof @t:
+            {
+
+                var ty = t.Type;
+                while (true)
+                {
+                    switch (ty)
+                    {
+                        case NodeTypeReference { TypeReference: RealizerStructure @rs }:
+                            return _structures[rs].typetbl;
+
+                        case MetadataTypeReference @meta:
+                            ty = meta.Typeof;
+                            continue;
+                        
+                        case ReferenceTypeReference @refe:
+                            ty = refe.Subtype;
+                            continue;
+
+                        default:
+                            throw new UnreachableException();
+                    }
+                }
+            }
             
             default: throw new UnreachableException();
         }
     }
 
+    
     private LLVMValueRef CompileExecCellValue_member(
         LLVMBuilderRef builder,
         Member member,
@@ -426,17 +454,26 @@ internal partial class LlvmCompiler
         switch (member.Node)
         {
             case RealizerField { Static: true } f:
-                return access == AccessMode.Value
-                    ? builder.BuildLoad2(ConvType(f.Type), _staticFields[f].fobj)
-                    : _staticFields[f].fobj;
+                if (access == AccessMode.Value)
+                {
+                    var load = builder.BuildLoad2(ConvType(f.Type), _staticFields[f].fobj);
+                    load.SetAlignment(AlignOf(f.Type));
+                    return load;
+                }
+                return _staticFields[f].fobj;
 
             case RealizerField { Static: false } f:
             {
                 var parentType = MemberToTypeRef((RealizerStructure)f.Parent!);
                 var fieldPtr = builder.BuildStructGEP2(parentType, inPointer!.Value, f.Index+1);
-                
-                return access == AccessMode.Value
-                    ? builder.BuildLoad2(ConvType(f.Type), fieldPtr) : fieldPtr;
+
+                if (access == AccessMode.Value)
+                {
+                    var load = builder.BuildLoad2(ConvType(f.Type), fieldPtr);
+                    load.SetAlignment(AlignOf(f.Type));
+                    return load;
+                }
+                return fieldPtr;
             }
 
             default: throw new UnreachableException();
@@ -454,7 +491,47 @@ internal partial class LlvmCompiler
         };
     }
 
+    private void CompileExecCellValue_assignment(LLVMBuilderRef builder, Assignment assignment,
+        CompileCodeBlockCtx ctx)
+    {
+        switch (assignment.Left)
+        {
+            case Member:
+            {
+                var ptr = CompileExecCellValue(builder, assignment.Left, ctx, AccessMode.Ptr);
+                var val = CompileExecCellValue(builder, assignment.Right, ctx);
+                var store = builder.BuildStore(val, ptr);
+                store.SetAlignment(AlignOf(assignment.Left.Type));
+            } break;
 
+            case Register @r:
+            {
+                var val = CompileExecCellValue(builder, assignment.Right, ctx,
+                    r.Type is ReferenceTypeReference ? AccessMode.Ptr : AccessMode.Value);
+                ctx.Registers[r.Index] = val;
+            } break;
+        }
+    }
+    
+    private LLVMValueRef CompileExecCellValue_constant(LLVMBuilderRef builder, Constant cons, CompileCodeBlockCtx ctx)
+    {
+        return cons.Value switch
+        {
+            IntegerConstantValue @icv => LLVMValueRef.CreateConstInt(ConvType(icv.Type),
+                unchecked((ulong)(Int128)icv.Value)),
+
+            NullConstantValue { Type: ReferenceTypeReference } @ncv => LLVMValueRef.CreateConstIntToPtr(
+                LLVMValueRef.CreateConstNull(LlvmOpaquePtr), LlvmOpaquePtr),
+
+            NullConstantValue { Type: SliceTypeReference } @ncv => LLVMValueRef.CreateConstStruct([
+                LLVMValueRef.CreateConstNull(LlvmOpaquePtr), LLVMValueRef.CreateConstInt(GetNativeInt(), 0)], false),
+            
+            SliceConstantValue @slice => StoreGlobalArray(ConvType(slice.ElementType), slice.Content, true),
+                    
+            _ => throw new UnreachableException(),
+        };
+    }
+    
 
     private LLVMTypeRef GetIntType(ushort bitsize)
     {
@@ -508,18 +585,23 @@ internal partial class LlvmCompiler
         
     }
 
-    private uint BitsToMemUnit(uint? size) => Math.Max(1, (size ?? _configuration.NativeIntegerSize) / _configuration.MemoryUnit);
+    private uint BitsToMemUnit(uint size) => (uint)Math.Max(1, size  / _configuration.MemoryUnit);
 
-    private uint AlignOf(RealizerStructure struc) => BitsToMemUnit(@struc.Alignment);
-    private uint AlignOf(TypeReference? type)
+    private uint AlignOf(RealizerStructure struc) => BitsToMemUnit(BitAlignOf(struc));
+    private uint AlignOf(TypeReference? type) => BitsToMemUnit(BitAlignOf(type));
+
+    private uint BitAlignOf(RealizerStructure struc) => (uint)struc.Alignment.ToInt(_configuration.NativeIntegerSize);
+    private uint BitAlignOf(TypeReference? type)
     {
-        if (type == null) return 0;
+        if (type == null)
+            return 0;
         return type switch
         {
-            NodeTypeReference { TypeReference: RealizerStructure @struct } => BitsToMemUnit(@struct.Alignment),
-            NodeTypeReference { TypeReference: RealizerTypedef @typedef } => AlignOf(typedef.BackingType),
+            NodeTypeReference { TypeReference: RealizerStructure @struct } => @struct.Alignment,
+            NodeTypeReference { TypeReference: RealizerTypedef @typedef } => BitAlignOf(typedef.BackingType
+                ?? new IntegerTypeReference(false, _configuration.NativeIntegerSize)),
             
-            IntegerTypeReference @intt => BitsToMemUnit(@intt.Bits),
+            IntegerTypeReference @intt => intt.Bits,
             ReferenceTypeReference or SliceTypeReference => _configuration.NativeIntegerSize,
             AnytypeTypeReference => throw new Exception("Anytype should already had ben solved"),
             
@@ -552,7 +634,8 @@ internal partial class LlvmCompiler
         var strdata = Encoding.UTF8.GetBytes(data);
         var array = new RealizerConstantValue[strdata.Length];
 
-        for (var i = 0; i < strdata.Length; i++) array[i] = new IntegerConstantValue(8, strdata[i]);
+        for (var i = 0; i < strdata.Length; i++)
+            array[i] = new IntegerConstantValue(new IntegerTypeReference(false, 8), strdata[i]);
 
         return StoreGlobalArray(LlvmInt8, array, true);
     }
@@ -595,7 +678,7 @@ internal partial class LlvmCompiler
             {
                 var value = unchecked((ulong)(Int128)i.Value);
                 
-                return i.BitSize switch
+                return i.Type.Bits switch
                 {
                     0 => (LLVMValueRef.CreateConstInt(GetNativeInt(), value, true), LlvmBool),
                     1  => (LLVMValueRef.CreateConstInt(LlvmBool, value, true), LlvmBool),
@@ -605,8 +688,8 @@ internal partial class LlvmCompiler
                     64 => (LLVMValueRef.CreateConstInt(LlvmInt64, value, true), LlvmInt64),
                     
                     _  => (LLVMValueRef.CreateConstIntOfArbitraryPrecision(
-                            LlvmInt(i.BitSize), BigIntegerToULongs(i.Value, i.BitSize)),
-                        LlvmInt(i.BitSize)),
+                            LlvmInt(i.Type.Bits), BigIntegerToULongs(i.Value, i.Type.Bits)), 
+                        LlvmInt(i.Type.Bits)),
                 };
             }
 
@@ -662,9 +745,7 @@ internal partial class LlvmCompiler
         public (OmegaCodeCell baseb, LLVMBasicBlockRef llvmb)[] BlockMap;
         
         public Dictionary<RealizerParameter, LLVMValueRef> Args;
-        public Dictionary<int, LLVMValueRef> Locals;
-
-        public Stack<TypeReference> expectingTypeStack;
+        public Dictionary<int, LLVMValueRef> Registers;
     }
 
     private enum AccessMode { Value, Ptr }
