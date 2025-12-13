@@ -26,7 +26,7 @@ export var std_settings = {
     stdout: (e) => console.error("Not implemented! ", e),
     memory: undefined,
 }
-export const Std = {
+export const std = {
     "Console.write(BigInt)": console_write_signedInt, "Console.write(UBigInt)": console_write_unsignedInt,
     "Console.write(string(Utf8))": console_write_string$Utf8,
     

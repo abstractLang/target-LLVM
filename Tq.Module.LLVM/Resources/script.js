@@ -1,4 +1,5 @@
-import { Std, std_settings } from './std.js';
+import { std, std_settings } from './lib_std.js';
+import { env, env_settings } from './lib_env.js';
 
 const stdout = document.querySelector("#stdout");
 const stdin = document.querySelector("#stdin");
@@ -8,30 +9,17 @@ const webassemblyMainPath = './main.wasm';
 await _start();
 async function _start()
 {
-    const memory = new WebAssembly.Memory({initial: 1});
-    const memoryView = new DataView(memory.buffer);
-    const table = new WebAssembly.Table({ initial: 16, element: 'anyfunc' });
-    let stackPointer = 0x0FFFF;
-
     const wasmcode = fetch(webassemblyMainPath);
     const rootlibs = {
-        env: {
-            "__linear_memory": memory,
-            "__stack_pointer": new WebAssembly.Global({ value: "i32", mutable: true }, stackPointer),
-            "__indirect_function_table": table,
-            "__multi3": i128_multiply,
-            
-            "mem_grow": (d) => memory.grow(d),
-            "mem_size": () => memory.buffer.byteLength / 65536,
-        },
-        Std: Std
+        env: env,
+        Std: std,
     };
     
     const wasminstance = (await WebAssembly.instantiateStreaming(wasmcode, rootlibs)).instance;
-    const entrypoint = wasminstance.exports["main"];
+    const entrypoint = wasminstance.exports["_start"];
 
     std_settings.stdout = append_simple_stdout;
-    std_settings.memory = memoryView;
+    std_settings.memory = env_settings.memory;
     
     try {
         append_stdout("control", "Program started\n");
@@ -78,12 +66,4 @@ function handle_escape(text)
     text = text.replace("{Console.CSIGeneral.reset}", '</span>');
 
     return text;
-}
-
-function i128_multiply(aLow, aHigh, bLow, bHigh) {
-    const a = (BigInt(aHigh) << 64n) | BigInt(aLow);
-    const b = (BigInt(bHigh) << 64n) | BigInt(bLow);
-    const res = a * b;
-    console.log(a, "+", b, "=", res);
-    return [Number(res & 0xFFFFFFFFFFFFFFFFn), Number(res >> 64n)];
 }

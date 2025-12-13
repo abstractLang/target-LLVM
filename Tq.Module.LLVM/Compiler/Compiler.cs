@@ -36,27 +36,27 @@ internal partial class LlvmCompiler
 
     public LlvmCompiler(LLVMContextRef llvmCtx, TargetsList llvm)
     {
-        this._llvmCtx = llvmCtx;
+        _llvmCtx = llvmCtx;
         _target = llvm;
-        _intrinsincs.Clear();
-        InitializeIntrinsics();
     }
 
     internal LLVMModuleRef Compile(RealizerProgram program, IOutputConfiguration config) 
     {
         _functions.Clear();
         _structures.Clear();
+        _intrinsincs.Clear();
         _configuration = config;
         
         _llvmModule = _llvmCtx.CreateModuleWithName(program.Name);
         _llvmBuilder = _llvmCtx.CreateBuilder();
 
-        
+        InitializeIntrinsics();        
         foreach (var m in program.Modules) DeclareModuleMembers(m);
 
         // Order matters here
         CompileFunctions();
         CompileStructs();
+        
         
         var ll = _llvmModule.PrintToString();
         File.WriteAllText($".abs-cache/debug/{program.Name}.llvmout.ll", ll);
@@ -74,27 +74,27 @@ internal partial class LlvmCompiler
 
 
         type = LlvmFunctionType(LlvmStructType([LlvmInt8, LlvmBool], false), [LlvmInt8, LlvmInt8]);
-        func = _llvmModule.AddFunction("llvm.sadd.with.overflow.i8", type);
+        func = LlvmAddFunction("llvm.sadd.with.overflow.i8", type);
         _intrinsincs.Add("sadd.w.ovf.i8", func);
-        func = _llvmModule.AddFunction("llvm.uadd.with.overflow.i8", type);
+        func = LlvmAddFunction("llvm.uadd.with.overflow.i8", type);
         _intrinsincs.Add("uadd.w.ovf.i8", func);
         
         type = LlvmFunctionType(LlvmStructType([LlvmInt16, LlvmBool], false), [LlvmInt16, LlvmInt16]);
-        func = _llvmModule.AddFunction("llvm.sadd.with.overflow.i16", type);
+        func = LlvmAddFunction("llvm.sadd.with.overflow.i16", type);
         _intrinsincs.Add("sadd.w.ovf.i16", func);
-        func = _llvmModule.AddFunction("llvm.uadd.with.overflow.i16", type);
+        func = LlvmAddFunction("llvm.uadd.with.overflow.i16", type);
         _intrinsincs.Add("uadd.w.ovf.i16", func);
         
         type = LlvmFunctionType(LlvmStructType([LlvmInt32, LlvmBool], false), [LlvmInt32, LlvmInt32]);
-        func = _llvmModule.AddFunction("llvm.sadd.with.overflow.i32", type);
+        func = LlvmAddFunction("llvm.sadd.with.overflow.i32", type);
         _intrinsincs.Add("sadd.w.ovf.i32", func);
-        func = _llvmModule.AddFunction("llvm.uadd.with.overflow.i32", type);
+        func = LlvmAddFunction("llvm.uadd.with.overflow.i32", type);
         _intrinsincs.Add("uadd.w.ovf.i32", func);
         
         type = LlvmFunctionType(LlvmStructType([LlvmInt64, LlvmBool], false), [LlvmInt64, LlvmInt64]);
-        func = _llvmModule.AddFunction("llvm.sadd.with.overflow.i64", type);
+        func = LlvmAddFunction("llvm.sadd.with.overflow.i64", type);
         _intrinsincs.Add("sadd.w.ovf.i64", func);
-        func = _llvmModule.AddFunction("llvm.uadd.with.overflow.i64", type);
+        func = LlvmAddFunction("llvm.uadd.with.overflow.i64", type);
         _intrinsincs.Add("uadd.w.ovf.i64", func);
         
         switch (_target)
@@ -102,11 +102,11 @@ internal partial class LlvmCompiler
             case TargetsList.Wasm:
             {
                 type = LlvmFunctionType(LlvmInt32, []);
-                func = _llvmModule.AddFunction("llvm.wasm.memory.size", type);
+                func = LlvmAddFunction("llvm.wasm.memory.size", type);
                 _intrinsincs.Add("wasm.memory.size", func);
                 
                 type = LlvmFunctionType(LlvmInt32, [LlvmInt32]);
-                func = _llvmModule.AddFunction("llvm.wasm.memory.grow", type);
+                func = LlvmAddFunction("llvm.wasm.memory.grow", type);
                 _intrinsincs.Add("wasm.memory.grow", func);
 
             } break;
@@ -143,13 +143,13 @@ internal partial class LlvmCompiler
     {
         var st = _llvmCtx.CreateNamedStruct(struc.Name);
         
-        var vtableType = _llvmCtx.GetStructType([
-            LlvmOpaquePtr, // Parent table
+        var vtableType = LlvmStructType([
+            LlvmPtr, // Parent table
             GetNativeInt(), // Type size
             GetNativeInt(), // Type alignment
             CreateSlice(LlvmInt8), // StructName
             GetNativeInt(), // Vtable length
-            LlvmArray(LlvmOpaquePtr, 0) // Table
+            LlvmArray(LlvmPtr, 0) // Table
         ], false);
         var vtableGlobal = _llvmModule.AddGlobal(vtableType, struc.Name + ".vtable");
         
@@ -170,7 +170,7 @@ internal partial class LlvmCompiler
         var argumentTypes = baseFunc.Parameters.Select(e => ConvType(e.Type)).ToArray();
         var functype = LlvmFunctionType(ConvType(baseFunc.ReturnType), argumentTypes);
 
-        var fun = _llvmModule.AddFunction(baseFunc.Name, functype);
+        var fun = LlvmAddFunction(baseFunc.Name, functype);
 
         if (baseFunc.ExportSymbol != null)
         {
@@ -211,7 +211,7 @@ internal partial class LlvmCompiler
         {
             if (block is not OmegaCodeCell @omega) throw new Exception("Expected OmegaBytecodeBuilder");
             
-            var llvmblock = LLVMAppendBasicBlock(llvmFunction, block.Name);
+            var llvmblock = LlvmAppendBasicBlock(llvmFunction, block.Name);
             codeCells[i] = (omega, llvmblock);
         }
 
@@ -264,7 +264,7 @@ internal partial class LlvmCompiler
     {
         List<LLVMTypeRef> fields = [];
         
-        fields.Add(LlvmOpaquePtr);
+        fields.Add(LlvmPtr);
         if (baseStruct.Extends != null)
             fields.AddRange(baseStruct.Extends.GetMembers<RealizerField>().Select(field => ConvType(field.Type!)));
         fields.AddRange(baseStruct.GetMembers<RealizerField>().Select(field => ConvType(field.Type!)));
@@ -272,7 +272,7 @@ internal partial class LlvmCompiler
         llvmStruct.StructSetBody(fields.ToArray(), false);
         
         var parentTablePointer = baseStruct.Extends == null
-            ? LLVMValueRef.CreateConstPointerNull(LlvmOpaquePtr)
+            ? LLVMValueRef.CreateConstPointerNull(LlvmPtr)
             : _structures[baseStruct.Extends].typetbl;
         
         List<LLVMValueRef> values = [];
@@ -288,7 +288,7 @@ internal partial class LlvmCompiler
                 LLVMValueRef.CreateConstInt(GetNativeInt(), (ulong)identifier.Length),
                 ], false),
             LLVMValueRef.CreateConstInt(GetNativeInt(), 0),
-            LLVMValueRef.CreateConstArray(LlvmOpaquePtr, [])
+            LLVMValueRef.CreateConstArray(LlvmPtr, [])
         ], false);
     }
 
@@ -363,19 +363,17 @@ internal partial class LlvmCompiler
             case Argument @a: return ctx.Args[a.Parameter];
 
             case Register @r:
-            {
-                var ptr = ctx.Registers[r.Index];
-                return access == AccessMode.Ptr ? ptr : builder.BuildLoad2(ConvType(r.Type), ptr);
-            }
+                return ctx.Registers[r.Index];
             
             case Alloca @a:
             {
-                var alloca = builder.BuildAlloca(ConvType(a.Type));
+                var alloca = builder.BuildAlloca(ConvType(a.AllocaType));
                 // FIXME
                 // technically accessing it as value is UB,
                 // see if it is a desired possible behavior
                 return access == AccessMode.Ptr
-                    ? alloca : builder.BuildLoad2(ConvType(((ReferenceTypeReference)a.Type).Subtype), alloca);
+                    ? alloca
+                    : builder.BuildLoad2(ConvType(((ReferenceTypeReference)a.Type).Subtype), alloca);
             }
 
             case Cmp @c:
@@ -412,7 +410,12 @@ internal partial class LlvmCompiler
                 return CompileExecCellValue(builder, r.Expression, ctx, AccessMode.Ptr);
 
             case Val @v:
-                return CompileExecCellValue(builder, v.Expression, ctx);
+            {
+                var ptr = CompileExecCellValue(builder, v.Expression, ctx, AccessMode.Ptr);
+                var val = builder.BuildLoad2(ConvType(v.Type), ptr);
+                val.SetAlignment(AlignOf(v.Type));
+                return val;
+            }
 
             case Typeof @t:
             {
@@ -521,29 +524,14 @@ internal partial class LlvmCompiler
                 unchecked((ulong)(Int128)icv.Value)),
 
             NullConstantValue { Type: ReferenceTypeReference } @ncv => LLVMValueRef.CreateConstIntToPtr(
-                LLVMValueRef.CreateConstNull(LlvmOpaquePtr), LlvmOpaquePtr),
+                LLVMValueRef.CreateConstNull(LlvmPtr), LlvmPtr),
 
             NullConstantValue { Type: SliceTypeReference } @ncv => LLVMValueRef.CreateConstStruct([
-                LLVMValueRef.CreateConstNull(LlvmOpaquePtr), LLVMValueRef.CreateConstInt(GetNativeInt(), 0)], false),
+                LLVMValueRef.CreateConstNull(LlvmPtr), LLVMValueRef.CreateConstInt(GetNativeInt(), 0)], false),
             
             SliceConstantValue @slice => StoreGlobalArray(ConvType(slice.ElementType), slice.Content, true),
                     
             _ => throw new UnreachableException(),
-        };
-    }
-    
-
-    private LLVMTypeRef GetIntType(ushort bitsize)
-    {
-        return bitsize switch
-        {
-            0 => GetNativeInt(),
-            1 => LlvmBool,
-            8 => LlvmInt8,
-            16 => LlvmInt16,
-            32 => LlvmInt32,
-            64 => LlvmInt64,
-            _ => LlvmInt(bitsize),
         };
     }
 
@@ -575,9 +563,9 @@ internal partial class LlvmCompiler
             },
             
             SliceTypeReference @slice => CreateSlice(ConvType(slice.Subtype)),
-            ReferenceTypeReference @refe => LlvmOpaquePtr,
+            ReferenceTypeReference @refe => LlvmPtr,
             NullableTypeReference @refe => refe.Subtype is ReferenceTypeReference
-                    ? LlvmOpaquePtr
+                    ? LlvmPtr
                     : LlvmStructType([ConvType(refe.Subtype), LlvmBool], true),
             
             _ => throw new UnreachableException()
@@ -672,7 +660,7 @@ internal partial class LlvmCompiler
         switch (val)
         {
             case NullConstantValue:
-                return (LLVMValueRef.CreateConstNull(LlvmOpaquePtr), LlvmOpaquePtr);
+                return (LLVMValueRef.CreateConstNull(LlvmPtr), LlvmPtr);
             
             case IntegerConstantValue i:
             {
@@ -707,8 +695,7 @@ internal partial class LlvmCompiler
         }
     }
     
-    private LLVMTypeRef CreateSlice(LLVMTypeRef elementType) => LLVMTypeRef.CreateStruct([
-        LlvmPtr(elementType), GetNativeInt()], false);
+    private LLVMTypeRef CreateSlice(LLVMTypeRef elementType) => LLVMTypeRef.CreateStruct([LlvmPtr, GetNativeInt()], false);
     private LLVMTypeRef GetNativeInt() => _configuration.NativeIntegerSize switch
     {
         1 => LlvmBool,
