@@ -1,4 +1,3 @@
-import { std, std_settings } from './lib_std.js';
 import { env, env_settings } from './lib_env.js';
 
 const stdout = document.querySelector("#stdout");
@@ -6,34 +5,34 @@ const stdin = document.querySelector("#stdin");
 
 const webassemblyMainPath = './main.wasm';
 
-await _start();
 async function _start()
 {
     const wasmcode = fetch(webassemblyMainPath);
-    const rootlibs = {
-        env: env,
-        Std: std,
-    };
+    const rootlibs = { env: env };
     
     const wasminstance = (await WebAssembly.instantiateStreaming(wasmcode, rootlibs)).instance;
     const entrypoint = wasminstance.exports["_start"];
 
-    std_settings.stdout = append_simple_stdout;
-    std_settings.memory = env_settings.memory;
+    env_settings.stdin = read_stdin;
+    env_settings.stdout = write_stdout;
+    env_settings.stderr = write_stderr;
     
     try {
-        append_stdout("control", "Program started\n");
+        append_console("control", "Program started\n");
         entrypoint();
-        append_stdout("control", "Program finished\n");
+        append_console("control", "Program finished\n");
     }
-    catch (error) {
-        append_stdout("error", "An unexpected error occurred: " + error + "\n");
-    }
+    catch (error) { append_console("error", "An unexpected error occurred: " + error + "\n"); }
 }
 
-function append_simple_stdout(text) { append_stdout("", text); }
+const write_stdout = (stdout) => append_console("stdout", stdout); 
+const write_stderr = (stdout) => append_console("stderr", stdout); 
+function read_stdin() {
+    alert("read stdin TODO");
+}
 
-function append_stdout(classes, text)
+
+function append_console(classes, text)
 {
     let oldtext = text;
     text = handle_escape(text);
@@ -45,14 +44,6 @@ function append_stdout(classes, text)
 
     stdout.appendChild(newline);
 }
-function allow_stdin(mode)
-{
-
-    if (mode === "character") append_stdout("control", "todo allow stdin");
-    else if (mode === "line") append_stdout("control", "todo allow stdin");
-
-}
-
 function handle_escape(text)
 {
     // common escape characters
@@ -67,3 +58,6 @@ function handle_escape(text)
 
     return text;
 }
+
+
+await _start();

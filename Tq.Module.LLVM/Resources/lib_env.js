@@ -7,17 +7,20 @@ export const env = {
     "__linear_memory": memory,
     "__stack_pointer": new WebAssembly.Global({ value: "i32", mutable: true }, stackPointer),
     "__indirect_function_table": table,
+    
     "__multi3": i128_multiply,
 
     "__aligned_alloc": alligned_alloc,
     
     //"mem_grow": (d) => memory.grow(d),
     //"mem_size": () => memory.buffer.byteLength / 65536,
+    
+    "__write": write,
 };
 export const env_settings = {
-    memory: memory,
-    memoryView: memory,
-    table: table,
+    stdin: undefined,
+    stdout: undefined,
+    stderr: undefined,
 };
 
 function i128_multiply(aLow, aHigh, bLow, bHigh) {
@@ -31,4 +34,8 @@ function i128_multiply(aLow, aHigh, bLow, bHigh) {
 function alligned_alloc(length, align) {
     console.log(`requested aligned allocation of ${length} bytes, align=${align}`);
     return 100;
+}
+
+function write(fd, content) {
+    console.log(`Trying to write to ${fd}: ${content}`);
 }
