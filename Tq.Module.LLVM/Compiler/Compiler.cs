@@ -441,6 +441,12 @@ internal partial class LlvmCompiler
                     }
                 }
             }
+
+            case LenOf @lenOf:
+            {
+                var val = CompileExecCellValue(builder, lenOf.Expression, ctx);
+                return builder.BuildExtractValue(val, 1);
+            }
             
             default: throw new UnreachableException();
         }

@@ -23,19 +23,30 @@ export const env_settings = {
     stderr: undefined,
 };
 
+let allocator = null;
+
 function i128_multiply(aLow, aHigh, bLow, bHigh) {
     const a = (BigInt(aHigh) << 64n) | BigInt(aLow);
     const b = (BigInt(bHigh) << 64n) | BigInt(bLow);
     const res = a * b;
-    console.log(a, "+", b, "=", res);
     return [Number(res & 0xFFFFFFFFFFFFFFFFn), Number(res >> 64n)];
 }
 
 function alligned_alloc(length, align) {
     console.log(`requested aligned allocation of ${length} bytes, align=${align}`);
+    
+    if (length === 0) return 0;
+        
     return 100;
 }
 
-function write(fd, content) {
-    console.log(`Trying to write to ${fd}: ${content}`);
+function write(fd, ptr, len) {
+    console.log(`Trying to write to ${fd}: ${ptr}[..len]`);
+    env_settings.stdout(readString(ptr, len))
+}
+
+
+function readString(ptr, len) {
+    let bytes = new Uint8Array(memory.buffer, ptr, len);
+    return new TextDecoder("utf-8").decode(bytes);
 }
