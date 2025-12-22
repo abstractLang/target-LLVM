@@ -15,6 +15,8 @@ internal unsafe partial class LlvmCompiler
     private LLVMTypeRef LlvmInt(uint bitsize) => Llvm.IntTypeInContext(_llvmCtx, bitsize);
     private LLVMTypeRef LlvmArray(LLVMTypeRef ety, uint count) => Llvm.ArrayType2(ety, count);
 
+    private LLVMValueRef LlvmUndef(LLVMTypeRef ety) => Llvm.GetUndef(ety);
+    
     private LLVMTypeRef LlvmFunctionType(LLVMTypeRef ReturnType, LLVMTypeRef[] ParamTypes)
     {
         fixed (LLVMTypeRef* pParamTypes = ParamTypes.AsSpan())

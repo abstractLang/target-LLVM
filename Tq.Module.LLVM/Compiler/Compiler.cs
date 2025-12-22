@@ -6,6 +6,7 @@ using Tq.Module.LLVM.Targets;
 using Tq.Realizeer.Core.Program;
 using Tq.Realizeer.Core.Program.Builder;
 using Tq.Realizeer.Core.Program.Member;
+using Tq.Realizer.Core.Builder.Execution;
 using Tq.Realizer.Core.Builder.Execution.Omega;
 using Tq.Realizer.Core.Builder.References;
 using Tq.Realizer.Core.Configuration.LangOutput;
@@ -206,18 +207,18 @@ internal partial class LlvmCompiler
         for (var i = 0; i < llvmargs.Length; i++) finalargs.Add(baseargs[i], llvmargs[i]);
         finalargs.TrimExcess();
         
-        var codeCells = new (OmegaCodeCell baseCell, LLVMBasicBlockRef llvmBlock)[baseFunc.ExecutionBlocksCount];
+        var codeCells = new (CodeCell, LLVMBasicBlockRef)[baseFunc.ExecutionBlocksCount];
         foreach (var (i, block) in baseFunc.ExecutionBlocks.Index())
         {
             if (block is not OmegaCodeCell @omega) throw new Exception("Expected OmegaBytecodeBuilder");
             
             var llvmblock = LlvmAppendBasicBlock(llvmFunction, block.Name);
-            codeCells[i] = (omega, llvmblock);
+            codeCells[i] = (block, llvmblock);
         }
 
         if (codeCells.Length > 0)
         {
-            _llvmBuilder.PositionAtEnd(codeCells[0].llvmBlock);
+            _llvmBuilder.PositionAtEnd(codeCells[0].Item2);
             foreach (var (i, p) in baseFunc.Parameters.Index())
             {
                 var paramValue = llvmFunction.GetParam((uint)i);
@@ -237,15 +238,16 @@ internal partial class LlvmCompiler
         }
 
         var count = 0;
+        var regs = new Dictionary<int, LLVMValueRef>();
         foreach (var (cell, llvmblock) in codeCells)
         {
-            var body = new Queue<IOmegaInstruction>(cell.Instructions);
+            var body = new Queue<IOmegaInstruction>(((OmegaCodeCell)cell).Instructions);
             var ctx = new CompileCodeBlockCtx {
                RealizerFunction = baseFunc,
                LlvmFunction = llvmFunction,
                BlockMap = codeCells,
                Args = finalargs,
-               Registers = [],
+               Registers = regs,
             };
             
             _llvmBuilder.PositionAtEnd(llvmblock);
@@ -311,6 +313,16 @@ internal partial class LlvmCompiler
                 else builder.BuildRet(CompileExecCellValue(builder, ret.Value, ctx));
             } break;
 
+            case CBranch @cb:
+            {
+                var exp = CompileExecCellValue(builder, cb.Expression, ctx);
+                builder.BuildCondBr(exp, ctx.BlockMap[cb.IfTrue].Item2, ctx.BlockMap[cb.IfFalse].Item2);
+            } break;
+
+            case Branch @b:
+                builder.BuildBr(ctx.BlockMap[b.Cell].Item2);
+                break;
+            
             case Throw @throw: builder.BuildUnreachable(); break;
             
             case IOmegaExpression @v: CompileExecCellValue(builder, v, ctx); break;
@@ -348,7 +360,14 @@ internal partial class LlvmCompiler
             }
             
             case Constant @const: return CompileExecCellValue_constant(builder, @const, ctx);
-                
+
+            case Slice @slice:
+            {
+                var a = LlvmUndef(ConvType(slice.Type));
+                var b = builder.BuildInsertValue(a, CompileExecCellValue(builder, slice.Pointer, ctx), 0);
+                var c = builder.BuildInsertValue(b, CompileExecCellValue(builder, slice.Lenght, ctx), 1);
+                return c;
+            }
             
             case Call @call:
             {
@@ -376,21 +395,32 @@ internal partial class LlvmCompiler
                     : builder.BuildLoad2(ConvType(((ReferenceTypeReference)a.Type).Subtype), alloca);
             }
 
+            case Indexer @i:
+            {
+                var slice = CompileExecCellValue(builder, i.Slice, ctx);
+                var index = CompileExecCellValue(builder, i.Index, ctx);
+                var elmptr = builder.BuildGEP2(ConvType(i.Type), slice, [index]);
+                
+                return access == AccessMode.Ptr
+                    ? elmptr
+                    : builder.BuildLoad2(ConvType(i.Type), elmptr);
+            }
+            
             case Cmp @c:
                 return builder.BuildICmp(c.Op switch
                     {
-                        ComparissonOperation.Equal => LLVMIntPredicate.LLVMIntEQ,
-                        ComparissonOperation.NotEqual => LLVMIntPredicate.LLVMIntNE,
+                        ComparisonOperation.Equal => LLVMIntPredicate.LLVMIntEQ,
+                        ComparisonOperation.NotEqual => LLVMIntPredicate.LLVMIntNE,
                         
-                        ComparissonOperation.SignedLessThan => LLVMIntPredicate.LLVMIntSLT,
-                        ComparissonOperation.SignedLessThanOrEqual => LLVMIntPredicate.LLVMIntSLE,
-                        ComparissonOperation.SignedGreaterThan => LLVMIntPredicate.LLVMIntSGT,
-                        ComparissonOperation.SignedGreaterThanOrEqual => LLVMIntPredicate.LLVMIntSGE,
+                        ComparisonOperation.SignedLessThan => LLVMIntPredicate.LLVMIntSLT,
+                        ComparisonOperation.SignedLessThanOrEqual => LLVMIntPredicate.LLVMIntSLE,
+                        ComparisonOperation.SignedGreaterThan => LLVMIntPredicate.LLVMIntSGT,
+                        ComparisonOperation.SignedGreaterThanOrEqual => LLVMIntPredicate.LLVMIntSGE,
                         
-                        ComparissonOperation.UnsignedLessThan => LLVMIntPredicate.LLVMIntULT,
-                        ComparissonOperation.UnsignedLessThanOrEqual => LLVMIntPredicate.LLVMIntULE,
-                        ComparissonOperation.UnsignedGreaterThan => LLVMIntPredicate.LLVMIntUGT,
-                        ComparissonOperation.UnsignedGreaterThanOrEqual => LLVMIntPredicate.LLVMIntUGE,
+                        ComparisonOperation.UnsignedLessThan => LLVMIntPredicate.LLVMIntULT,
+                        ComparisonOperation.UnsignedLessThanOrEqual => LLVMIntPredicate.LLVMIntULE,
+                        ComparisonOperation.UnsignedGreaterThan => LLVMIntPredicate.LLVMIntUGT,
+                        ComparisonOperation.UnsignedGreaterThanOrEqual => LLVMIntPredicate.LLVMIntUGE,
                         
                         _ => throw new ArgumentOutOfRangeException()
                     },
@@ -399,6 +429,8 @@ internal partial class LlvmCompiler
 
             case IntTypeCast @it:
                 return builder.BuildIntCast(CompileExecCellValue(builder, it.Exp, ctx), ConvType(it.Type));
+            case PtrTypeCast @pt:
+                return CompileExecCellValue(builder, pt.Exp, ctx);
             
             case IntFromPtr @itp:
                 return builder.BuildPtrToInt(CompileExecCellValue(builder, itp.Expression, ctx), ConvType(itp.Type));
@@ -735,7 +767,7 @@ internal partial class LlvmCompiler
         public RealizerFunction RealizerFunction;
         public LLVMValueRef LlvmFunction;
         
-        public (OmegaCodeCell baseb, LLVMBasicBlockRef llvmb)[] BlockMap;
+        public (CodeCell, LLVMBasicBlockRef)[] BlockMap;
         
         public Dictionary<RealizerParameter, LLVMValueRef> Args;
         public Dictionary<int, LLVMValueRef> Registers;
