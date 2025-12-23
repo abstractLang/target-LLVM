@@ -3,15 +3,15 @@ using System.Numerics;
 using System.Text;
 using LLVMSharp.Interop;
 using Tq.Module.LLVM.Targets;
-using Tq.Realizeer.Core.Program;
-using Tq.Realizeer.Core.Program.Builder;
-using Tq.Realizeer.Core.Program.Member;
+using Tq.Realizer.Core.Execution.Omega;
+using Tq.Realizer.Core.Program;
+using Tq.Realizer.Core.Program.Builder;
+using Tq.Realizer.Core.Program.Member;
 using Tq.Realizer.Core.Builder.Execution;
-using Tq.Realizer.Core.Builder.Execution.Omega;
 using Tq.Realizer.Core.Builder.References;
 using Tq.Realizer.Core.Configuration.LangOutput;
 using Tq.Realizer.Core.Intermediate.Values;
-using static Tq.Realizer.Core.Builder.Language.Omega.OmegaInstructions;
+using static Tq.Realizer.Core.Execution.Omega.OmegaInstructions;
 
 namespace Tq.Module.LLVM.Compiler;
 
@@ -197,7 +197,7 @@ internal partial class LlvmCompiler
     private void CompileFunctions()
     {
         foreach (var (baseFunction, (llvmFuncType, llvmFunction)) in _functions)
-            if (baseFunction is { ExecutionBlocksCount: > 0 } @fb) CompileFunction(fb, llvmFunction);
+            if (baseFunction is { ExecutionBlocks.Length: > 0 } @fb) CompileFunction(fb, llvmFunction);
     }
     private void CompileFunction(RealizerFunction baseFunc, LLVMValueRef llvmFunction)
     {
@@ -207,7 +207,7 @@ internal partial class LlvmCompiler
         for (var i = 0; i < llvmargs.Length; i++) finalargs.Add(baseargs[i], llvmargs[i]);
         finalargs.TrimExcess();
         
-        var codeCells = new (CodeCell, LLVMBasicBlockRef)[baseFunc.ExecutionBlocksCount];
+        var codeCells = new (CodeCell, LLVMBasicBlockRef)[baseFunc.ExecutionBlocks.Length];
         foreach (var (i, block) in baseFunc.ExecutionBlocks.Index())
         {
             if (block is not OmegaCodeCell @omega) throw new Exception("Expected OmegaBytecodeBuilder");
@@ -316,14 +316,14 @@ internal partial class LlvmCompiler
             case CBranch @cb:
             {
                 var exp = CompileExecCellValue(builder, cb.Expression, ctx);
-                builder.BuildCondBr(exp, ctx.BlockMap[cb.IfTrue].Item2, ctx.BlockMap[cb.IfFalse].Item2);
+                builder.BuildCondBr(exp,
+                    ctx.BlockMap[cb.IfTrue.Index].Item2,
+                    ctx.BlockMap[cb.IfFalse.Index].Item2);
             } break;
 
             case Branch @b:
-                builder.BuildBr(ctx.BlockMap[b.Cell].Item2);
+                builder.BuildBr(ctx.BlockMap[b.Cell.Index].Item2);
                 break;
-            
-            case Throw @throw: builder.BuildUnreachable(); break;
             
             case IOmegaExpression @v: CompileExecCellValue(builder, v, ctx); break;
             

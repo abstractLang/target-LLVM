@@ -1,7 +1,7 @@
 using System.Reflection;
 using LLVMSharp.Interop;
 using Tq.Module.LLVM.Compiler;
-using Tq.Realizeer.Core.Program;
+using Tq.Realizer.Core.Program;
 using Tq.Realizer.Core.Builder;
 using Tq.Realizer.Core.Configuration.LangOutput;
 
